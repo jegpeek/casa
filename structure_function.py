@@ -710,16 +710,14 @@ def plot_s2_thumbnails(sf, fit, chunk_id=None, figsize=(18, 20),
                        uv_range=0.2, vmin_sf=1e-4, vmax_sf=5e-3,
                        vdiff=1e-4):
     """
-    Summary figure for one chunk.
+    Thumbnail grid for one chunk: 5 rows x 9 cols, no spacing.
 
-    Thumbnail grid (top): 6 rows × 9 cols (54 cells, 45 used).
-      rows 0–1 : observed S2 (15 epoch pairs)
-      rows 2–3 : model prediction
-      rows 4–5 : residuals (data − model), masked to fit_mask
-    Bottom: S2 vs |lag| and S2 vs ellipsoidal-radius plots side by side.
+    Each row contains 3 epoch pairs; each pair occupies 3 consecutive columns
+    (S2, pred, diff).  Column headers repeat "S2 / pred / diff" across the
+    top; row labels on the left list the epoch pairs in each row.
 
-    The suptitle reports chunk_id, χ²/dof, N, principal-axis lengths,
-    and (θ, φ) angles.
+    The suptitle reports chunk_id, $\\chi^2$/dof, N, principal-axis lengths,
+    and (theta, phi) angles.
 
     Parameters
     ----------
@@ -727,9 +725,9 @@ def plot_s2_thumbnails(sf, fit, chunk_id=None, figsize=(18, 20),
     fit      : dict from fit_s2()
     chunk_id : label for the suptitle
     figsize  : matplotlib figsize
-    uv_range : ± half-width of each thumbnail [ly]
+    uv_range : +/- half-width of each thumbnail [ly]
     vmin_sf, vmax_sf : color limits for S2 / prediction thumbnails (log scale)
-    vdiff    : ± color limit for residual thumbnails (linear scale)
+    vdiff    : +/- color limit for residual thumbnails (linear scale)
     """
     s2_arr   = sf['s2']
     lag_du   = sf['lag_du']
@@ -740,7 +738,7 @@ def plot_s2_thumbnails(sf, fit, chunk_id=None, figsize=(18, 20),
     fitres   = fit['fit']
     n_pairs  = len(pairs)          # 15
 
-    # --- suptitle ---
+    # --- suptitle (LaTeX, no Unicode escapes) ---
     resid   = fitres.fun
     chi2dof = float(np.sum(resid**2)) / max(len(resid) - len(fitres.x), 1)
     n_pts   = len(fit['log_s2_obs'])
@@ -748,59 +746,65 @@ def plot_s2_thumbnails(sf, fit, chunk_id=None, figsize=(18, 20),
         fit['params'])
     suptitle = (
         f"chunk {chunk_id}   "
-        f"\u03c7\u00b2/dof={chi2dof:.2f}   N={n_pts/1e6:.2f}M   "
-        f"a\u2081={a1:.3f} ly   "
-        f"a\u2082/a\u2081={a2/a1:.2f}   a\u2083/a\u2081={a3/a1:.2f}   "
-        f"\u03b8={np.degrees(theta):.1f}\u00b0   "
-        f"\u03c6={np.degrees(phi):.1f}\u00b0"
+        f"$\\chi^2$/dof={chi2dof:.2f}   "
+        f"N={n_pts/1e6:.2f}M   "
+        f"$a_1$={a1:.3f} ly   "
+        f"$a_2/a_1$={a2/a1:.2f}   "
+        f"$a_3/a_1$={a3/a1:.2f}   "
+        f"$\\theta$={np.degrees(theta):.1f}$^\\circ$   "
+        f"$\\phi$={np.degrees(phi):.1f}$^\\circ$"
     )
 
-    # --- layout ---
-    # rows 0–5: thumbnails (6 rows × 9 cols; 2 rows per type, 15 per type)
-    # row  6:   two 1-D plots
-    fig = plt.figure(figsize=figsize)
-    gs  = gridspec.GridSpec(7, 9, figure=fig,
-                            height_ratios=[1, 1, 1, 1, 1, 1, 2.5],
-                            hspace=0.55, wspace=0.12)
+    # --- layout: 5 rows x 9 cols, 3 pairs per row, 3 types per pair ---
+    pairs_per_row = 3
+    n_rows = (n_pairs + pairs_per_row - 1) // pairs_per_row
+    n_cols = pairs_per_row * 3   # 9
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize,
+                             gridspec_kw={'hspace': 0, 'wspace': 0})
+    fig.subplots_adjust(top=0.93, left=0.08, right=0.99, bottom=0.01)
 
     diff_arr = np.array(
         [(s2_arr[k] - s2_pred[k]) * fit_mask[k] for k in range(n_pairs)])
+    type_data = [('S2', s2_arr, False), ('pred', s2_pred, False),
+                 ('diff', diff_arr, True)]
 
-    for sec, (sec_label, images, is_diff) in enumerate([
-            ('S2',   s2_arr,   False),
-            ('pred', s2_pred,  False),
-            ('diff', diff_arr, True)]):
-        base_row = sec * 2
-        for k in range(n_pairs):
-            row = base_row + k // 9
-            col = k % 9
-            ax  = fig.add_subplot(gs[row, col])
+    for k in range(n_pairs):
+        row   = k // pairs_per_row
+        group = k % pairs_per_row
+        for ti, (_, images, is_diff) in enumerate(type_data):
+            col = group * 3 + ti
+            ax  = axes[row, col]
             plt.sca(ax)
             if is_diff:
                 util_efs.imshow(images[k].T, lag_du, lag_dv,
-                          vmin=-vdiff, vmax=vdiff, cmap='RdBu_r')
+                                vmin=-vdiff, vmax=vdiff, cmap='RdBu_r')
             else:
                 util_efs.imshow(images[k].T, lag_du, lag_dv, log=True,
-                          vmin=vmin_sf, vmax=vmax_sf, cmap='viridis')
+                                vmin=vmin_sf, vmax=vmax_sf, cmap='viridis')
             ax.set_xlim(-uv_range, uv_range)
             ax.set_ylim(-uv_range, uv_range)
-            ax.set_title(
-                f"{sec_label} ({pairs[k][0]},{pairs[k][1]})", fontsize=4)
-            ax.tick_params(labelsize=3)
-            if col > 0:
-                ax.set_yticklabels([])
-            if row != 5:
-                ax.set_xticklabels([])
+            ax.tick_params(left=False, bottom=False,
+                           labelleft=False, labelbottom=False)
 
-    # 1-D plots
-    ax_lag = fig.add_subplot(gs[6, :4])
-    ax_ell = fig.add_subplot(gs[6, 5:])
-    plot_s2_1d(sf, fit, ellipsoidal=False, ax=ax_lag)
-    ax_lag.set_title('S\u2082 vs |lag|', fontsize=8)
-    plot_s2_1d(sf, fit, ellipsoidal=True, ax=ax_ell)
-    ax_ell.set_title('S\u2082 vs ellipsoidal radius', fontsize=8)
+    # Hide any unused cells (if n_pairs % pairs_per_row != 0)
+    for k in range(n_pairs, n_rows * pairs_per_row):
+        for ti in range(3):
+            axes[k // pairs_per_row, (k % pairs_per_row) * 3 + ti].set_visible(False)
 
-    fig.suptitle(suptitle, fontsize=7, y=0.998)
+    # Column headers on top row: "S2 / pred / diff" repeated
+    col_labels = ['S2', 'pred', 'diff'] * pairs_per_row
+    for col, label in enumerate(col_labels):
+        axes[0, col].set_title(label, fontsize=6, pad=2)
+
+    # Row labels on left: list the epoch pairs in each row
+    for row in range(n_rows):
+        row_pairs = [str(pairs[row * pairs_per_row + g])
+                     for g in range(pairs_per_row)
+                     if row * pairs_per_row + g < n_pairs]
+        axes[row, 0].set_ylabel(', '.join(row_pairs), fontsize=5, labelpad=3)
+
+    fig.suptitle(suptitle, fontsize=7)
     return fig
 
 
