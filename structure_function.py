@@ -465,7 +465,7 @@ def principal_axes_from_params(params):
     L = np.array([[s11, l12, l13],
                   [0.0, s22, l23],
                   [0.0, 0.0, s33]])
-    C = L.T @ L
+    C = L @ L.T
 
     # Eigendecompose C = Q diag(a^2) Q^T, eigenvalues descending
     eigvals, Q = np.linalg.eigh(C)          # eigh returns ascending order
@@ -706,28 +706,12 @@ def plot_s2_1d(sf, fit=None, ellipsoidal=False, ax=None, **scatter_kwargs):
     return xrange, yrange
 
 
-def plot_s2_thumbnails(sf, fit, chunk_id=None, figsize=(18, 20),
-                       uv_range=0.2, vmin_sf=1e-4, vmax_sf=5e-3,
-                       vdiff=1e-4):
+def _make_thumbnail_axes(sf, fit, subplot_spec,
+                          uv_range=0.2, vmin_sf=1e-4, vmax_sf=5e-3,
+                          vdiff=1e-4):
     """
-    Thumbnail grid for one chunk: 5 rows x 9 cols, no spacing.
-
-    Each row contains 3 epoch pairs; each pair occupies 3 consecutive columns
-    (S2, pred, diff).  Column headers repeat "S2 / pred / diff" across the
-    top; row labels on the left list the epoch pairs in each row.
-
-    The suptitle reports chunk_id, $\\chi^2$/dof, N, principal-axis lengths,
-    and (theta, phi) angles.
-
-    Parameters
-    ----------
-    sf       : dict from compute_s2()
-    fit      : dict from fit_s2()
-    chunk_id : label for the suptitle
-    figsize  : matplotlib figsize
-    uv_range : +/- half-width of each thumbnail [ly]
-    vmin_sf, vmax_sf : color limits for S2 / prediction thumbnails (log scale)
-    vdiff    : +/- color limit for residual thumbnails (linear scale)
+    Populate a region (given by subplot_spec or None for a new figure) with
+    the 5x9 thumbnail grid.  Returns the figure and the axes array.
     """
     s2_arr   = sf['s2']
     lag_du   = sf['lag_du']
@@ -735,34 +719,22 @@ def plot_s2_thumbnails(sf, fit, chunk_id=None, figsize=(18, 20),
     pairs    = sf['epoch_pairs']
     s2_pred  = fit['s2_pred']
     fit_mask = fit['fit_mask']
-    fitres   = fit['fit']
-    n_pairs  = len(pairs)          # 15
+    n_pairs  = len(pairs)
 
-    # --- suptitle (LaTeX, no Unicode escapes) ---
-    resid   = fitres.fun
-    chi2dof = float(np.sum(resid**2)) / max(len(resid) - len(fitres.x), 1)
-    n_pts   = len(fit['log_s2_obs'])
-    a1, a2, a3, theta, phi, psi, alpha = principal_axes_from_params(
-        fit['params'])
-    suptitle = (
-        f"chunk {chunk_id}   "
-        f"$\\chi^2$/dof={chi2dof:.2f}   "
-        f"N={n_pts/1e6:.2f}M   "
-        f"$a_1$={a1:.3f} ly   "
-        f"$a_2/a_1$={a2/a1:.2f}   "
-        f"$a_3/a_1$={a3/a1:.2f}   "
-        f"$\\theta$={np.degrees(theta):.1f}$^\\circ$   "
-        f"$\\phi$={np.degrees(phi):.1f}$^\\circ$"
-    )
-
-    # --- layout: 5 rows x 9 cols, 3 pairs per row, 3 types per pair ---
     pairs_per_row = 3
     n_rows = (n_pairs + pairs_per_row - 1) // pairs_per_row
     n_cols = pairs_per_row * 3   # 9
 
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize,
-                             gridspec_kw={'hspace': 0, 'wspace': 0})
-    fig.subplots_adjust(top=0.93, left=0.08, right=0.99, bottom=0.01)
+    fig = plt.gcf()
+    if subplot_spec is None:
+        inner_gs = gridspec.GridSpec(n_rows, n_cols, hspace=0, wspace=0)
+    else:
+        inner_gs = gridspec.GridSpecFromSubplotSpec(
+            n_rows, n_cols, subplot_spec=subplot_spec, hspace=0, wspace=0)
+
+    axes = np.array([[fig.add_subplot(inner_gs[r, c])
+                      for c in range(n_cols)]
+                     for r in range(n_rows)])
 
     diff_arr = np.array(
         [(s2_arr[k] - s2_pred[k]) * fit_mask[k] for k in range(n_pairs)])
@@ -778,37 +750,134 @@ def plot_s2_thumbnails(sf, fit, chunk_id=None, figsize=(18, 20),
             plt.sca(ax)
             if is_diff:
                 util_efs.imshow(images[k].T, lag_du, lag_dv,
-                                vmin=-vdiff, vmax=vdiff, cmap='RdBu_r')
+                                vmin=-vdiff, vmax=vdiff, cmap='binary')
             else:
                 util_efs.imshow(images[k].T, lag_du, lag_dv, log=True,
-                                vmin=vmin_sf, vmax=vmax_sf, cmap='viridis')
+                                vmin=vmin_sf, vmax=vmax_sf, cmap='binary')
             ax.set_xlim(-uv_range, uv_range)
             ax.set_ylim(-uv_range, uv_range)
             ax.tick_params(left=False, bottom=False,
                            labelleft=False, labelbottom=False)
 
-    # Hide any unused cells (if n_pairs % pairs_per_row != 0)
+    # Hide unused cells
     for k in range(n_pairs, n_rows * pairs_per_row):
         for ti in range(3):
-            axes[k // pairs_per_row, (k % pairs_per_row) * 3 + ti].set_visible(False)
+            axes[k // pairs_per_row,
+                 (k % pairs_per_row) * 3 + ti].set_visible(False)
 
-    # Column headers on top row: "S2 / pred / diff" repeated
+    # Column headers and row labels
     col_labels = ['S2', 'pred', 'diff'] * pairs_per_row
     for col, label in enumerate(col_labels):
         axes[0, col].set_title(label, fontsize=6, pad=2)
-
-    # Row labels on left: list the epoch pairs in each row
     for row in range(n_rows):
         row_pairs = [str(pairs[row * pairs_per_row + g])
                      for g in range(pairs_per_row)
                      if row * pairs_per_row + g < n_pairs]
         axes[row, 0].set_ylabel(', '.join(row_pairs), fontsize=5, labelpad=3)
 
-    fig.suptitle(suptitle, fontsize=7)
+    return fig, axes
+
+
+def _chunk_suptitle(fit, chunk_id):
+    """Return the standard suptitle string for a chunk."""
+    fitres  = fit['fit']
+    resid   = fitres.fun
+    chi2dof = float(np.sum(resid**2)) / max(len(resid) - len(fitres.x), 1)
+    n_pts   = len(fit['log_s2_obs'])
+    a1, a2, a3, theta, phi, psi, alpha = principal_axes_from_params(
+        fit['params'])
+    return (
+        f"chunk {chunk_id}   "
+        f"$\\chi^2$/dof={chi2dof:.2f}   "
+        f"N={n_pts/1e6:.2f}M   "
+        f"$a_1$={a1:.3f} ly   "
+        f"$a_2/a_1$={a2/a1:.2f}   "
+        f"$a_3/a_1$={a3/a1:.2f}   "
+        f"$\\theta$={np.degrees(theta):.1f}$^\\circ$   "
+        f"$\\phi$={np.degrees(phi):.1f}$^\\circ$"
+    )
+
+
+def plot_s2_thumbnails(sf, fit, chunk_id=None, figsize=(18, 10),
+                       uv_range=0.2, vmin_sf=1e-4, vmax_sf=5e-3,
+                       vdiff=1e-4):
+    """
+    Standalone thumbnail grid for one chunk: 5 rows x 9 cols, no spacing.
+
+    Each row contains 3 epoch pairs; each pair occupies 3 consecutive columns
+    (S2, pred, diff).  Column headers repeat "S2 / pred / diff" across the
+    top; row labels on the left list the epoch pairs in each row.
+
+    Parameters
+    ----------
+    sf       : dict from compute_s2()
+    fit      : dict from fit_s2()
+    chunk_id : label for the suptitle
+    figsize  : matplotlib figsize
+    uv_range : +/- half-width of each thumbnail [ly]
+    vmin_sf, vmax_sf : color limits for S2 / prediction thumbnails (log scale)
+    vdiff    : +/- color limit for residual thumbnails (linear scale)
+    """
+    fig = plt.figure(figsize=figsize)
+    _make_thumbnail_axes(sf, fit, subplot_spec=None,
+                         uv_range=uv_range, vmin_sf=vmin_sf,
+                         vmax_sf=vmax_sf, vdiff=vdiff)
+    fig.suptitle(_chunk_suptitle(fit, chunk_id), fontsize=7)
+    fig.subplots_adjust(top=0.93, left=0.08, right=0.99, bottom=0.01)
     return fig
 
 
-def plot_rgb_epochs(data, fit, ax=None, percentile_clip=(1, 99)):
+def plot_full_page(sf, fit, data, chunk_id=None, figsize=(8.5, 11),
+                   uv_range=0.2, vmin_sf=1e-4, vmax_sf=5e-3, vdiff=1e-4):
+    """
+    Full-page summary for one chunk.
+
+    Layout (top to bottom):
+      - Thumbnail grid (thumbnails take ~60% of page height)
+      - Row of two 1-D SF plots (vs |lag| and vs ellipsoidal radius)
+      - Row with the RGB epoch composite
+
+    Parameters
+    ----------
+    sf, fit, data : outputs of compute_s2(), fit_s2(), read_chunk()
+    chunk_id      : label for the suptitle
+    figsize       : matplotlib figsize
+    uv_range, vmin_sf, vmax_sf, vdiff : passed to thumbnail grid
+    """
+    fig = plt.figure(figsize=figsize)
+
+    # Outer: 3 rows (thumbnails / 1-D plots / RGB), 3 cols so RGB can be
+    # centred by occupying the middle column only.
+    outer = gridspec.GridSpec(3, 3, figure=fig,
+                              height_ratios=[3, 1.2, 1.4],
+                              width_ratios=[1, 2, 1],
+                              hspace=0.3, wspace=0.3)
+
+    # Thumbnails span the full width of the top row
+    _make_thumbnail_axes(sf, fit, subplot_spec=outer[0, :],
+                         uv_range=uv_range, vmin_sf=vmin_sf,
+                         vmax_sf=vmax_sf, vdiff=vdiff)
+
+    # 1-D SF plots: split the full-width row into two equal halves
+    inner_1d = gridspec.GridSpecFromSubplotSpec(
+        1, 2, subplot_spec=outer[1, :], wspace=0.3)
+    ax_lag = fig.add_subplot(inner_1d[0, 0])
+    ax_ell = fig.add_subplot(inner_1d[0, 1])
+    plot_s2_1d(sf, fit, ellipsoidal=False, ax=ax_lag)
+    ax_lag.set_title('$S_2$ vs $|$lag$|$', fontsize=8)
+    plot_s2_1d(sf, fit, ellipsoidal=True, ax=ax_ell)
+    ax_ell.set_title('$S_2$ vs ellipsoidal radius', fontsize=8)
+
+    # RGB composite: centred, using only the middle column
+    ax_rgb = fig.add_subplot(outer[2, 1])
+    plot_rgb_epochs(data, fit, ax=ax_rgb)
+
+    fig.suptitle(_chunk_suptitle(fit, chunk_id), fontsize=8)
+    fig.subplots_adjust(top=0.95, bottom=0.02)
+    return fig
+
+
+def plot_rgb_epochs(data, fit, ax=None, percentile_clip=(5, 99)):
     """
     RGB composite of the first three flux epochs with expected motion vectors.
 
@@ -819,7 +888,7 @@ def plot_rgb_epochs(data, fit, ax=None, percentile_clip=(1, 99)):
     UV-plane shift between consecutive epochs derived from the fitted
     principal-axis direction:
 
-        (dU, dV) = dW * cos(theta) * (sin(phi), cos(phi))
+        (dU, dV) = dW * tan(theta) * (cos(phi), sin(phi))
 
     where dW = W_values[i+1] - W_values[i] and (theta, phi) are the polar
     and azimuthal angles of the longest principal axis.
@@ -842,7 +911,10 @@ def plot_rgb_epochs(data, fit, ax=None, percentile_clip=(1, 99)):
     for c in range(3):
         ch = flux[c].astype(float)
         finite = ch[np.isfinite(ch)]
-        lo, hi = np.percentile(finite, [lo_pct, hi_pct])
+        if len(finite) > 0:
+            lo, hi = np.percentile(finite, [lo_pct, hi_pct])
+        else:
+            lo = hi = 0
         ch = np.clip(ch, lo, hi)
         ch = (ch - lo) / max(hi - lo, 1e-30)
         ch[~np.isfinite(flux[c])] = 0.0
@@ -853,8 +925,8 @@ def plot_rgb_epochs(data, fit, ax=None, percentile_clip=(1, 99)):
         fit['params'])
 
     def motion_uv(dw):
-        return np.array([dw * np.cos(theta) * np.sin(phi),
-                         dw * np.cos(theta) * np.cos(phi)])
+        return np.array([dw * np.sin(theta) / np.cos(theta) * np.cos(phi),
+                         dw * np.sin(theta) / np.cos(theta) * np.sin(phi)])
 
     dW_01 = float(W_vals[1] - W_vals[0])
     dW_12 = float(W_vals[2] - W_vals[1])
@@ -866,28 +938,33 @@ def plot_rgb_epochs(data, fit, ax=None, percentile_clip=(1, 99)):
 
     du  = float(np.median(np.diff(U_grid)))
     dv  = float(np.median(np.diff(V_grid)))
-    ext = [U_grid[0] - du/2, U_grid[-1] + du/2,
-           V_grid[0] - dv/2, V_grid[-1] + dv/2]
+    ext = [U_grid[0, 0] - du/2, U_grid[0, -1] + du/2,
+           V_grid[0, 0] - dv/2, V_grid[-1, 0] + dv/2]
     ax.imshow(rgb, extent=ext, origin='lower', aspect='equal')
 
-    span     = U_grid[-1] - U_grid[0]
+    span     = U_grid[0, -1] - U_grid[0, 0]
     arrow_kw = dict(length_includes_head=True,
                     head_width=span * 0.012, head_length=span * 0.006,
                     linewidth=1.5)
     u_cen = float(np.mean(U_grid))
     v_cen = float(np.mean(V_grid))
-    ax.arrow(u_cen, v_cen, v_01[0], v_01[1], color='cyan',   **arrow_kw)
-    ax.arrow(u_cen, v_cen, v_12[0], v_12[1], color='yellow', **arrow_kw)
-    ax.legend(handles=[
-        mpatches.Patch(color='cyan',
-                       label=f'0\u21921 (dW={dW_01:.3f} ly)'),
-        mpatches.Patch(color='yellow',
-                       label=f'1\u21922 (dW={dW_12:.3f} ly)'),
-    ], fontsize=7, loc='lower right')
+    ax.arrow(u_cen, v_cen, v_01[0], v_01[1], color='yellow', **arrow_kw)
+    ax.arrow(u_cen + v_01[0], v_cen + v_01[1],
+             v_12[0], v_12[1], color='cyan',   **arrow_kw)
+    ax.set_xlim(ext[0], ext[1])
+    ax.set_ylim(ext[2], ext[3])
+    # ax.legend(handles=[
+    #     mpatches.Patch(color='yellow',
+    #                    label=f'0->1 (dW={dW_01:.3f} ly)'),
+    #     mpatches.Patch(color='cyan',
+    #                    label=f'1->2 (dW={dW_12:.3f} ly)'),
+    # ], fontsize=7, loc='lower right')
 
-    ax.set_xlabel('U [ly]', fontsize=8)
-    ax.set_ylabel('V [ly]', fontsize=8)
-    ax.set_title('RGB epochs 0/1/2 + expected motion', fontsize=9)
+    # ax.set_xlabel('U [ly]', fontsize=8)
+    # ax.set_ylabel('V [ly]', fontsize=8)
+    # ax.set_title('RGB epochs 0/1/2 + expected motion', fontsize=9)
+    ax.xaxis.set_ticklabels([])
+    ax.yaxis.set_ticklabels([])
     return ax
 
 
