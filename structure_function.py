@@ -123,7 +123,9 @@ def _sum_diff_sq_full(m_i_fft, mf_i_fft, mf2_i_fft,
 def compute_s2(data: dict,
                clip_percentiles: tuple | None = (0.002, 0.998),
                fill_nans: bool = False,
-               assume_stationary: bool = True) -> dict:
+               assume_stationary: bool = True,
+               background: float | None = 0.03,
+               arcsinh_scale: float | None = 0.03) -> dict:
     """
     Compute the 3D structure function for one chunk.
 
@@ -141,6 +143,14 @@ def compute_s2(data: dict,
                        global per-epoch variance, matching the
                        S2 = 2*(var − AC) formula used in get_sf_2d.
                        Default False.
+    background       : if not None, subtract this constant from all epochs
+                       before any other processing.  Use to remove a common
+                       instrumental background shared across epochs.
+    arcsinh_scale    : if not None, apply arcsinh(flux / arcsinh_scale) after
+                       background subtraction and clipping but before per-epoch
+                       mean subtraction.  Sets the transition scale between
+                       linear (noise-dominated) and logarithmic (signal-dominated)
+                       behaviour; typically set to the per-pixel noise level.
 
     Returns
     -------
@@ -163,6 +173,9 @@ def compute_s2(data: dict,
     """
     flux = data["flux_epochs"].copy()   # (n_epochs, n_rows, n_cols)
 
+    if background is not None:
+        flux -= background
+
     if clip_percentiles is not None:
         lo_frac, hi_frac = clip_percentiles
         for e in range(flux.shape[0]):
@@ -173,6 +186,9 @@ def compute_s2(data: dict,
             lo = np.percentile(valid, lo_frac * 100)
             hi = np.percentile(valid, hi_frac * 100)
             flux[e] = np.where((plane < lo) | (plane > hi), np.nan, plane)
+
+    if arcsinh_scale is not None:
+        flux = np.arcsinh(flux / arcsinh_scale)
 
     for e in range(flux.shape[0]):
         flux[e] -= np.nanmean(flux[e])
@@ -259,6 +275,10 @@ def compute_s2(data: dict,
         "lag_dv":      lag_dv,
         "lag_dw":      lag_dw,
         "epoch_pairs": epoch_pairs,
+        "u_mean":      float(np.mean(U_grid)),
+        "v_mean":      float(np.mean(V_grid)),
+        "w_mean":      float(np.mean(W)),
+        "w_values":    W.copy(),
     }
 
 # old code
@@ -300,50 +320,92 @@ def get_sf_2d(image):
 
 
 # ---------------------------------------------------------------------------
-# Structure function fitting
+# Structure function fitting — 1D profile functions
+# ---------------------------------------------------------------------------
+# Each profile is a callable: profile(r, params_array) -> log10(S2)
+# with attached metadata: .n_params, .param_names, .default_guess
+# (None entries in default_guess are replaced by a data-driven amplitude
+# estimate inside fit_s2).
+#
+# The full parameter vector used by the optimizer is always:
+#   [s11, s22, s33, l12, l13, l23,  <-- 6 geometric (L-matrix) params
+#    *profile_params]                <-- profile.n_params params
+
+def weibull_log_s2(r, params):
+    """S2 = var_inf * (1 - exp(-r^beta))^(alpha/beta)"""
+    alpha, beta, var_inf = params
+    weibull = np.maximum(1.0 - np.exp(-r ** beta), 1e-300)
+    return np.log10(var_inf) + (alpha / beta) * np.log10(weibull)
+
+weibull_log_s2.n_params      = 3
+weibull_log_s2.param_names   = ['alpha', 'beta', 'var_inf']
+weibull_log_s2.default_guess = [0.4, 2.0, None]   # None → data-driven
+
+
+def broken_pl_log_s2(r, params):
+    """S2 = A * (r/r_b)^alpha1 / (1 + (r/r_b)^(alpha1-alpha2))
+
+    Steep power law alpha1 at small r, flat power law alpha2 at large r,
+    transitioning around r_b.  S2(r_b) = A/2.
+    """
+    alpha1, alpha2, r_b, A = params
+    log_r_over_rb = np.log(np.maximum(r, 1e-100) / r_b)
+    # log(1 + (r/r_b)^(alpha1-alpha2)) computed stably via logaddexp
+    log_denom = np.logaddexp(0.0, (alpha1 - alpha2) * log_r_over_rb)
+    return (np.log10(A) + alpha1 * log_r_over_rb / np.log(10)
+            - log_denom / np.log(10))
+
+broken_pl_log_s2.n_params      = 4
+broken_pl_log_s2.param_names   = ['alpha1', 'alpha2', 'r_b', 'A']
+broken_pl_log_s2.default_guess = [1.0, 0.4, 0.1, 1.0]
+
+
+# ---------------------------------------------------------------------------
+# Model evaluation
 # ---------------------------------------------------------------------------
 
-def log_s2_model(params, lags):
+_GEOM_KEYS = ['s11', 's22', 's33', 'l12', 'l13', 'l23']
+_N_GEOM    = 6
+
+
+def _compute_r(geom_params, lags):
+    """Ellipsoidal radius r = |L⁻¹ lag| for each row of lags (N, 3)."""
+    s11, s22, s33, l12, l13, l23 = geom_params
+    L = np.array([[s11, l12, l13],
+                  [0.0, s22, l23],
+                  [0.0, 0.0, s33]])
+    x = scipy.linalg.solve_triangular(L, np.asarray(lags).T)   # (3, N)
+    return np.maximum(np.sqrt((x * x).sum(axis=0)), 1e-100)
+
+
+def log_s2_model(params, lags, profile=None):
     """
-    Evaluate log10 S2 for the Weibull structure function model:
-
-        S2(lag) = var_inf * (1 - exp(-r^beta))^(alpha/beta)
-
-    where r = |L⁻¹ lag|.  At small lag S2 ≈ var_inf * r^alpha;
-    at large lag S2 → var_inf.
-
-    L is upper-triangular with the diagonal given directly as scale values
-    (in ly), not exponentiated:
-
-        L = [[s11,  l12,  l13],
-             [0,    s22,  l23],
-             [0,    0,    s33]]
+    Evaluate log10 S2 on lag vectors using a pluggable 1D profile.
 
     Parameters
     ----------
-    params : array-like [s11, s22, s33, l12, l13, l23, alpha, beta, var_inf]
-             or a params dict as returned by fit_s2(...)['params']
-    lags   : (N, 3) array of [dU, dV, dW] lag vectors [ly]
+    params  : array-like [s11, s22, s33, l12, l13, l23, *profile_params]
+              or a params dict as returned by fit_s2(...)['params']
+    lags    : (N, 3) array of [dU, dV, dW] lag vectors [ly]
+    profile : 1D profile callable (default: weibull_log_s2)
 
     Returns
     -------
     (N,) array of log10 S2 values
     """
+    if profile is None:
+        profile = weibull_log_s2
     if isinstance(params, dict):
-        params = [params['s11'], params['s22'], params['s33'],
-                  params['l12'], params['l13'], params['l23'],
-                  params['alpha'], params['beta'], params['var_inf']]
-    s11, s22, s33, l12, l13, l23, alpha, beta, var_inf = params
-    L = np.array([[s11,  l12,  l13],
-                  [0.0,  s22,  l23],
-                  [0.0,  0.0,  s33]])
-    r = scipy.linalg.solve_triangular(L, np.asarray(lags).T)   # (3, N)
-    r_norm = np.maximum(np.sqrt((r * r).sum(axis=0)), 1e-100)
-    weibull = np.maximum(1.0 - np.exp(-r_norm ** beta), 1e-300)
-    return np.log10(var_inf) + (alpha / beta) * np.log10(weibull)
+        geom   = [params[k] for k in _GEOM_KEYS]
+        prof   = [params[k] for k in profile.param_names]
+    else:
+        geom   = params[:_N_GEOM]
+        prof   = params[_N_GEOM:]
+    r = _compute_r(geom, lags)
+    return profile(r, prof)
 
 
-def predict_s2(params, lag_du, lag_dv, lag_dw):
+def predict_s2(params, lag_du, lag_dv, lag_dw, profile=None):
     """
     Evaluate the S2 model on a full (n_pairs, n_lag_v, n_lag_u) grid.
 
@@ -353,11 +415,14 @@ def predict_s2(params, lag_du, lag_dv, lag_dw):
     lag_du  : (n_lag_u,) U lag coordinates [ly]
     lag_dv  : (n_lag_v,) V lag coordinates [ly]
     lag_dw  : (n_pairs,) W lag per plane [ly]
+    profile : 1D profile callable (default: weibull_log_s2)
 
     Returns
     -------
     (n_pairs, n_lag_v, n_lag_u) array of predicted S2 values
     """
+    if profile is None:
+        profile = weibull_log_s2
     DV, DU = np.meshgrid(lag_dv, lag_du, indexing='ij')
     du_flat = DU.ravel()
     dv_flat = DV.ravel()
@@ -366,14 +431,14 @@ def predict_s2(params, lag_du, lag_dv, lag_dw):
     s2_pred = np.empty((n_pairs, n_lag_v, n_lag_u))
     for k, dw in enumerate(lag_dw):
         lags = np.column_stack([du_flat, dv_flat, np.full(du_flat.size, dw)])
-        s2_pred[k] = (10 ** log_s2_model(params, lags)).reshape(n_lag_v, n_lag_u)
+        s2_pred[k] = (10 ** log_s2_model(params, lags, profile=profile)
+                      ).reshape(n_lag_v, n_lag_u)
     return s2_pred
 
 
-def params_from_principal_axes(a1, a2, a3, theta, phi, psi, alpha,
-                               beta=2.0, var_inf=0.001):
+def params_from_principal_axes(a1, a2, a3, theta, phi, psi):
     """
-    Build model params dict from principal-axis ellipsoid description.
+    Build geometry params dict from principal-axis ellipsoid description.
 
     The ellipsoid covariance C = L L^T has semi-axes a1 >= a2 >= a3 (in
     light-years) oriented by the rotation matrix Q whose columns are the
@@ -392,16 +457,10 @@ def params_from_principal_axes(a1, a2, a3, theta, phi, psi, alpha,
     psi : float [rad]
         Roll of a2/a3 around a1.  psi=0: a2 lies in the plane spanned by
         a1 and W (or, if a1 || W, a2 is along U).
-    alpha : float
-        Power-law slope of S2.
-    beta : float
-        Weibull shape parameter controlling transition sharpness (default 2).
-    var_inf : float
-        Asymptotic S2 value at large lags (default 0.001).
 
     Returns
     -------
-    dict with keys s11, s22, s33, l12, l13, l23, alpha, beta, var_inf
+    dict with keys s11, s22, s33, l12, l13, l23
     """
     # Longest-axis unit vector  (U, V, W components)
     n1 = np.array([np.sin(theta) * np.cos(phi),
@@ -432,35 +491,181 @@ def params_from_principal_axes(a1, a2, a3, theta, phi, psi, alpha,
     l12 = (C[0, 1] - l23 * l13) / s22
     s11 = np.sqrt(C[0, 0] - l12**2 - l13**2)
 
-    return dict(s11=s11, s22=s22, s33=s33, l12=l12, l13=l13, l23=l23,
-                alpha=alpha, beta=beta, var_inf=var_inf)
+    return dict(s11=s11, s22=s22, s33=s33, l12=l12, l13=l13, l23=l23)
+
+
+def params_from_uvshift(du_per_dw, dv_per_dw, scale, elongation,
+                        psi=0.0, axis_ratio=1.0):
+    """
+    Build geometry params from eyeball-observable quantities.
+
+    Parameters
+    ----------
+    du_per_dw : float
+        Arrow U-component: dU shift of S2 minimum per unit dW.
+        Equals l13/s33 in the L-matrix parameterization.
+    dv_per_dw : float
+        Arrow V-component: dV shift of S2 minimum per unit dW.
+        Equals l23/s33 in the L-matrix parameterization.
+    scale : float
+        Overall size [ly]: the minor semi-axis length a2 (= a3 for prolate).
+    elongation : float
+        Axis ratio a1/a2 (>= 1).  elongation=1 gives a sphere.
+    psi : float [rad]
+        Roll of a2/a3 around a1 (default 0, relevant only when
+        axis_ratio != 1).
+    axis_ratio : float
+        a3/a2 ratio (default 1 = prolate; < 1 gives a triaxial ellipsoid).
+
+    Returns
+    -------
+    dict with keys s11, s22, s33, l12, l13, l23
+
+    Notes
+    -----
+    phi is taken directly from the arrow direction.  theta is solved
+    numerically from the prolate-ellipsoid formula relating the arrow
+    magnitude to elongation and theta:
+
+        |arrow|^2 = sin^2(theta) cos^2(theta) (e^2 - 1)^2
+                    / (e^2 cos^2(theta) + sin^2(theta))^2
+
+    where e = a1/a2 = elongation.  In the degenerate case elongation=1
+    (sphere) or |arrow|=0, theta defaults to pi/2.
+    """
+    phi = np.arctan2(dv_per_dw, du_per_dw)
+    arrow_mag = np.sqrt(du_per_dw**2 + dv_per_dw**2)
+
+    e = elongation
+
+    if e <= 1.0 or arrow_mag == 0.0:
+        theta = np.pi / 2.0
+    else:
+        # Solve for theta in [0, pi/2]:
+        #   f(theta) = sin(theta)*cos(theta)*(e^2-1) / (e^2*cos^2+sin^2) - arrow_mag
+        # which is equivalent to the arrow-magnitude formula.
+        from scipy.optimize import brentq
+
+        def f(th):
+            s, c = np.sin(th), np.cos(th)
+            denom = e**2 * c**2 + s**2
+            return s * c * (e**2 - 1.0) / denom - arrow_mag
+
+        # f(0)=0, f(pi/2)=0, maximum somewhere in between.
+        # The function peaks at some theta_peak; if arrow_mag exceeds the
+        # peak there is no solution — clamp to theta_peak.
+        th_grid = np.linspace(1e-6, np.pi / 2 - 1e-6, 1000)
+        f_vals = np.vectorize(f)(th_grid)
+        peak_idx = np.argmax(f_vals)
+
+        if f_vals[peak_idx] <= 0:
+            # arrow_mag exceeds g_max — no exact solution, clamp to theta_peak.
+            theta = th_grid[peak_idx]
+        else:
+            # Two solutions exist; pick the one in (0, theta_peak).
+            theta = brentq(f, 1e-6, th_grid[peak_idx])
+
+    a1 = scale * elongation
+    a2 = scale
+    a3 = scale * axis_ratio
+
+    return params_from_principal_axes(a1, a2, a3, theta, phi, psi)
+
+
+def estimate_uvshift(sf, inner_uv_pixels=200):
+    """
+    Estimate du_per_dw and dv_per_dw from the S2 minimum in cross-epoch slices.
+
+    The minimum of S2 at dW lies at (l13/s33*dW, l23/s33*dW), so dividing by
+    dW gives the shift rates directly.  Sub-pixel accuracy is obtained by
+    parabolic interpolation around the argmin in each direction independently.
+
+    Pairs are tried in order of increasing |dW| (excluding same-epoch pairs).
+    The first pair whose minimum is not at the edge of the search window is
+    used.  Raises ValueError if no usable pair is found.
+
+    Parameters
+    ----------
+    sf : dict
+        Output of compute_s2.
+    inner_uv_pixels : int
+        Half-width of the central search region in pixels (default 200).
+
+    Returns
+    -------
+    du_per_dw, dv_per_dw : float
+    """
+    lag_du = sf['lag_du']
+    lag_dv = sf['lag_dv']
+    p  = inner_uv_pixels
+    cu = len(lag_du) // 2
+    cv = len(lag_dv) // 2
+    u_sl = slice(max(cu - p, 0), min(cu + p + 1, len(lag_du)))
+    v_sl = slice(max(cv - p, 0), min(cv + p + 1, len(lag_dv)))
+
+    def _parabolic_refine(arr, idx):
+        if idx == 0 or idx == len(arr) - 1:
+            return float(idx)
+        a, b, c = arr[idx - 1], arr[idx], arr[idx + 1]
+        if not (np.isfinite(a) and np.isfinite(c)):
+            return float(idx)
+        denom = 2.0 * (a - 2.0 * b + c)
+        return idx - (c - a) / denom if denom != 0.0 else float(idx)
+
+    # Sort candidate pairs by |dW|, shortest non-zero spacing first
+    dws = sf['lag_dw']
+    order = sorted(
+        (k for k, dw in enumerate(dws) if dw != 0.0),
+        key=lambda k: abs(dws[k]),
+    )
+    if not order:
+        raise ValueError("No cross-epoch pairs with non-zero dW")
+
+    last_exc = None
+    for k in order:
+        dw = dws[k]
+        s2 = sf['s2'][k][v_sl, u_sl].copy()
+        s2[~np.isfinite(s2)] = np.inf
+        iv_crop, iu_crop = np.unravel_index(np.argmin(s2), s2.shape)
+        if (iu_crop == 0 or iu_crop == s2.shape[1] - 1 or
+                iv_crop == 0 or iv_crop == s2.shape[0] - 1):
+            last_exc = ValueError(
+                f"S2 minimum at edge of search window for pair "
+                f"{sf['epoch_pairs'][k]} (dW={dw:.3f})")
+            continue
+        iu_fine = _parabolic_refine(s2[iv_crop, :], iu_crop)
+        iv_fine = _parabolic_refine(s2[:, iu_crop], iv_crop)
+        du_min = lag_du[u_sl][0] + iu_fine * (lag_du[1] - lag_du[0])
+        dv_min = lag_dv[v_sl][0] + iv_fine * (lag_dv[1] - lag_dv[0])
+        return du_min / dw, dv_min / dw
+
+    raise last_exc
 
 
 def principal_axes_from_params(params):
     """
-    Decompose model params into principal-axis ellipsoid description.
+    Decompose geometry params into principal-axis ellipsoid description.
 
     Inverse of params_from_principal_axes.
 
     Parameters
     ----------
-    params : dict with keys s11, s22, s33, l12, l13, l23, alpha[, beta, var_inf]
-             or array-like [s11, s22, s33, l12, l13, l23, alpha, ...]
+    params : dict with keys s11, s22, s33, l12, l13, l23
+             or array-like [s11, s22, s33, l12, l13, l23, ...]
 
     Returns
     -------
-    a1, a2, a3 : float  -- semi-axis lengths [ly], sorted descending
-    theta      : float  -- polar angle of a1 from W axis [rad]
-    phi        : float  -- azimuthal angle of a1 from U in UV plane [rad]
-    psi        : float  -- roll of a2/a3 around a1 [rad]
-    alpha      : float  -- power-law slope
+    dict with keys:
+      a1, a2, a3 : float  -- semi-axis lengths [ly], sorted descending
+      theta      : float  -- polar angle of a1 from W axis [rad]
+      phi        : float  -- azimuthal angle of a1 from U in UV plane [rad]
+      psi        : float  -- roll of a2/a3 around a1 [rad]
     """
     if not isinstance(params, dict):
-        s11, s22, s33, l12, l13, l23, alpha = params[:7]
+        s11, s22, s33, l12, l13, l23 = params[:6]
     else:
         s11 = params['s11']; s22 = params['s22']; s33 = params['s33']
         l12 = params['l12']; l13 = params['l13']; l23 = params['l23']
-        alpha = params['alpha']
 
     L = np.array([[s11, l12, l13],
                   [0.0, s22, l23],
@@ -494,77 +699,32 @@ def principal_axes_from_params(params):
     n2 = Q[:, 1]
     psi = np.arctan2(n2 @ n3_0, n2 @ n2_0)
 
-    return a1, a2, a3, theta, phi, psi, alpha
+    return dict(a1=a1, a2=a2, a3=a3, theta=theta, phi=phi, psi=psi)
 
 
-def fit_s2(result: dict,
-           guess: dict | None = None,
-           inner_uv_pixels: int = 200,
-           min_same_epoch_lag_pix: int = 4,
-           s2_floor: float = 10**-3.75,
-           noise_scale_dex: float = 0.1) -> dict:
-    """
-    Fit S2(dU, dV, dW) = var_inf*(1-exp(-r^beta))^(alpha/beta) to the
-    structure function, where r = |L⁻¹ lag|.
-    See log_s2_model() for the full parameterization.
-
-    Fitting is done in log10 space with a pseudo-Huber (soft_l1) loss, with
-    residuals normalized by noise_scale_dex.
-
-    Parameters
-    ----------
-    result              : dict returned by compute_s2()
-    guess               : optional dict with any of the keys 's11','s22','s33',
-                          'l12','l13','l23','alpha','beta','var_inf'
-                          to override defaults
-    inner_uv_pixels     : half-width in pixels of the UV lag region to include;
-                          keeps lags in [-inner, +inner) in each UV direction
-    min_same_epoch_lag_pix : for dW=0 planes, exclude the central square of
-                          ±this many pixels in each UV direction (avoids zero
-                          lag and PSF-correlated region)
-    s2_floor            : S2 values below this are clipped before taking log
-    noise_scale_dex     : residuals are divided by this before applying the
-                          pseudo-Huber loss (sets the inlier/outlier boundary)
-
-    Returns
-    -------
-    dict with keys:
-      fit          : scipy.optimize.least_squares result object
-      params       : dict of named fitted parameters
-      s2_pred      : (n_pairs, 2*p, 2*p) predicted S2 on the inner UV grid,
-                     where p = inner_uv_pixels
-      lag_du_inner : (2*p,) U lags used for s2_pred
-      lag_dv_inner : (2*p,) V lags used for s2_pred
-      lags_used    : (N, 3) [dU, dV, dW] of data points included in fit
-      log_s2_obs   : (N,) observed log10 S2 values
-      log_s2_pred  : (N,) predicted log10 S2 at lags_used
-    """
-    s2_arr      = result['s2']
-    lag_du      = result['lag_du']
-    lag_dv      = result['lag_dv']
-    lag_dw      = result['lag_dw']
-    epoch_pairs = result['epoch_pairs']
+def _make_fit_data(sf, inner_uv_pixels, min_same_epoch_lag_pix, s2_floor):
+    """Select lag points for fitting; shared by fit_s2 and build_fit_result."""
+    s2_arr      = sf['s2']
+    lag_du      = sf['lag_du']
+    lag_dv      = sf['lag_dv']
+    lag_dw      = sf['lag_dw']
+    epoch_pairs = sf['epoch_pairs']
 
     n_pairs, n_lag_v, n_lag_u = s2_arr.shape
-    cv = n_lag_v // 2
-    cu = n_lag_u // 2
-    p  = inner_uv_pixels
-
+    p    = inner_uv_pixels
+    cv   = n_lag_v // 2
+    cu   = n_lag_u // 2
     v_sl = slice(cv - p, cv + p)
     u_sl = slice(cu - p, cu + p)
-    dv_inner = lag_dv[v_sl]     # (2p,)
-    du_inner = lag_du[u_sl]     # (2p,)
-    DV, DU = np.meshgrid(dv_inner, du_inner, indexing='ij')   # (2p, 2p)
 
-    # Row/col offsets from zero-lag center within the inner slice
+    DV, DU = np.meshgrid(lag_dv[v_sl], lag_du[u_sl], indexing='ij')
     row_off = np.abs(np.arange(2 * p) - p)
     col_off = np.abs(np.arange(2 * p) - p)
     ROW_OFF, COL_OFF = np.meshgrid(row_off, col_off, indexing='ij')
-    near_zero = (ROW_OFF <= min_same_epoch_lag_pix) & (COL_OFF <= min_same_epoch_lag_pix)
+    near_zero = ((ROW_OFF <= min_same_epoch_lag_pix) &
+                 (COL_OFF <= min_same_epoch_lag_pix))
 
-    # Build flat data arrays
     dU_list, dV_list, dW_list, log_s2_list = [], [], [], []
-
     fit_mask = np.zeros((n_pairs, n_lag_v, n_lag_u), dtype=bool)
 
     for k, (i, j) in enumerate(epoch_pairs):
@@ -581,44 +741,161 @@ def fit_s2(result: dict,
         log_s2_list.append(log_s2.ravel()[sel])
 
     lags_flat  = np.column_stack([np.concatenate(dU_list),
-                                   np.concatenate(dV_list),
-                                   np.concatenate(dW_list)])  # (N, 3)
-    log_s2_obs = np.concatenate(log_s2_list)                  # (N,)
+                                  np.concatenate(dV_list),
+                                  np.concatenate(dW_list)])
+    log_s2_obs = np.concatenate(log_s2_list)
+    return fit_mask, lags_flat, log_s2_obs
 
-    # Default var_inf guess: median of finite S2 in the fit region
-    inner_s2 = s2_arr[:, v_sl, u_sl]
-    var_inf_guess = float(np.nanmedian(inner_s2[np.isfinite(inner_s2)]))
 
-    # Free params: [s11, s22, s33, l12, l13, l23, alpha, beta, var_inf]
-    g = guess or {}
-    p0 = np.array([g.get('s11',     1.0),
-                   g.get('s22',     1.0),
-                   g.get('s33',     1.0),
-                   g.get('l12',     0.0),
-                   g.get('l13',     0.0),
-                   g.get('l23',     0.0),
-                   g.get('alpha',   0.4),
-                   g.get('beta',    2.0),
-                   g.get('var_inf', var_inf_guess)])
+def _point_weights(lags_flat, sf, weighting):
+    """Per-point weights w_i; objective = sum(w_i*(obs-pred)^2/sigma^2)."""
+    if weighting is None:
+        return np.ones(len(lags_flat))
+    if weighting == '1/r':
+        r_uv = np.hypot(lags_flat[:, 0], lags_flat[:, 1])
+        lag_step = float(abs(sf['lag_du'][1] - sf['lag_du'][0]))
+        return 1.0 / np.maximum(r_uv, lag_step)
+    raise ValueError(f"Unknown weighting: {weighting!r}")
 
-    def _unpack(params):
-        s11, s22, s33, l12, l13, l23, alpha, beta, var_inf = params
-        return dict(s11=s11, s22=s22, s33=s33,
-                    l12=l12, l13=l13, l23=l23,
-                    alpha=alpha, beta=beta, var_inf=var_inf)
 
-    def _residuals(params):
-        return (log_s2_obs - log_s2_model(params, lags_flat)) / noise_scale_dex
+def build_fit_result(sf, params, profile=None,
+                     inner_uv_pixels: int = 200,
+                     min_same_epoch_lag_pix: int = 4,
+                     s2_floor: float = 10**-3.75,
+                     noise_scale_dex: float = 0.1,
+                     weighting='1/r') -> dict:
+    """
+    Build the same dict as fit_s2 returns, but from a given params array or
+    dict rather than from optimisation.  Useful for manually exploring
+    parameter space and generating plots.
 
-    fit = least_squares(_residuals, p0, loss='soft_l1', f_scale=1.0)
+    Parameters
+    ----------
+    sf      : dict returned by compute_s2()
+    params  : array-like [s11,s22,s33,l12,l13,l23,*profile_params]
+              or a dict with those keys
+    profile : 1D profile callable (default: weibull_log_s2)
+    inner_uv_pixels, min_same_epoch_lag_pix, s2_floor, noise_scale_dex :
+              same meaning as in fit_s2; must match if comparing to an
+              existing fit_s2 result
+    """
+    from types import SimpleNamespace
+    if profile is None:
+        profile = weibull_log_s2
+
+    if isinstance(params, dict):
+        params_arr = np.array([params[k] for k in _GEOM_KEYS]
+                              + [params[k] for k in profile.param_names])
+    else:
+        params_arr = np.asarray(params, dtype=float)
+
+    params_dict = {**dict(zip(_GEOM_KEYS, params_arr[:_N_GEOM])),
+                   **dict(zip(profile.param_names, params_arr[_N_GEOM:]))}
+
+    fit_mask, lags_flat, log_s2_obs = _make_fit_data(
+        sf, inner_uv_pixels, min_same_epoch_lag_pix, s2_floor)
+
+    weights_flat = _point_weights(lags_flat, sf, weighting)
+    residuals    = (np.sqrt(weights_flat) * (log_s2_obs - log_s2_model(params_arr, lags_flat, profile=profile))
+                    / noise_scale_dex)
+    mock_fit     = SimpleNamespace(x=params_arr, fun=residuals,
+                                   nfev=0, success=True)
+
+    # Build 3D fit_weight: 0 where excluded, w_i where included.
+    lag_du, lag_dv = sf['lag_du'], sf['lag_dv']
+    DV_full, DU_full = np.meshgrid(lag_dv, lag_du, indexing='ij')
+    if weighting == '1/r':
+        lag_step = float(abs(lag_du[1] - lag_du[0]))
+        w_2d = 1.0 / np.maximum(np.hypot(DU_full, DV_full), lag_step)
+    else:
+        w_2d = np.ones_like(DU_full)
+    fit_weight = fit_mask * w_2d   # (n_pairs, n_lag_v, n_lag_u)
 
     return {
-        'fit':        fit,
-        'params':     _unpack(fit.x),
-        's2_pred':    predict_s2(fit.x, lag_du, lag_dv, lag_dw),
-        'fit_mask':   fit_mask,
+        'fit':        mock_fit,
+        'params':     params_dict,
+        'profile':    profile,
+        'weighting':  weighting,
+        's2_pred':    predict_s2(params_arr, sf['lag_du'], sf['lag_dv'],
+                                 sf['lag_dw'], profile=profile),
+        'fit_weight': fit_weight,
         'log_s2_obs': log_s2_obs,
     }
+
+
+def fit_s2(result: dict,
+           profile=None,
+           guess: dict | None = None,
+           inner_uv_pixels: int = 200,
+           min_same_epoch_lag_pix: int = 4,
+           s2_floor: float = 10**-3.75,
+           noise_scale_dex: float = 0.1,
+           max_nfev: int | None = None,
+           weighting='1/r') -> dict:
+    """
+    Fit S2(dU, dV, dW) to the structure function using a pluggable 1D profile.
+
+    The full parameter vector is [s11, s22, s33, l12, l13, l23, *profile_params].
+    Fitting is done in log10 space with a pseudo-Huber (soft_l1) loss, with
+    residuals normalised by noise_scale_dex.
+
+    Parameters
+    ----------
+    result              : dict returned by compute_s2()
+    profile             : 1D profile callable (default: weibull_log_s2).
+                          Must have .n_params, .param_names, .default_guess.
+    guess               : optional dict overriding any geometric or profile
+                          parameter defaults
+    inner_uv_pixels     : half-width in pixels of the UV lag region to include
+    min_same_epoch_lag_pix : exclude central ±N pixels for dW=0 planes
+    s2_floor            : S2 values below this are clipped before taking log
+    noise_scale_dex     : residuals divided by this (inlier/outlier boundary)
+    max_nfev            : maximum function evaluations (None = unlimited)
+    """
+    if profile is None:
+        profile = weibull_log_s2
+
+    fit_mask, lags_flat, log_s2_obs = _make_fit_data(
+        result, inner_uv_pixels, min_same_epoch_lag_pix, s2_floor)
+
+    inner_s2  = result['s2'][:, result['lag_dv'].size//2 - inner_uv_pixels
+                                :result['lag_dv'].size//2 + inner_uv_pixels,
+                               result['lag_du'].size//2 - inner_uv_pixels
+                                :result['lag_du'].size//2 + inner_uv_pixels]
+    amp_guess = float(np.nanmedian(inner_s2[np.isfinite(inner_s2)]))
+
+    g = guess or {}
+    try:
+        du, dv = estimate_uvshift(result)
+    except Exception:
+        du, dv = 0.0, 0.0
+    # scale=0.3 ly places saturation at the inner-window edge, keeping the
+    # power-law regime well-sampled; elongation=1 forces l13=l23=0 (no shift),
+    # so use 5 instead.
+    auto_geom = params_from_uvshift(du, dv, scale=0.3, elongation=5.0)
+    geom_p0 = [g.get(k, auto_geom[k]) for k in _GEOM_KEYS]
+    prof_p0  = [g.get(name, (amp_guess if default is None else default))
+                for name, default in zip(profile.param_names,
+                                         profile.default_guess)]
+    p0 = np.array(geom_p0 + prof_p0)
+
+    sqrt_w = np.sqrt(_point_weights(lags_flat, result, weighting))
+
+    def _residuals(params):
+        return sqrt_w * (log_s2_obs - log_s2_model(params, lags_flat,
+                                                    profile=profile)) / noise_scale_dex
+
+    fit = least_squares(_residuals, p0, loss='soft_l1', f_scale=1.0,
+                        max_nfev=max_nfev)
+
+    out = build_fit_result(result, fit.x, profile=profile,
+                           inner_uv_pixels=inner_uv_pixels,
+                           min_same_epoch_lag_pix=min_same_epoch_lag_pix,
+                           s2_floor=s2_floor,
+                           noise_scale_dex=noise_scale_dex,
+                           weighting=weighting)
+    out['fit'] = fit   # replace mock with real optimizer result
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -650,7 +927,7 @@ def plot_s2_1d(sf, fit=None, ellipsoidal=False, ax=None, **scatter_kwargs):
     lag_dw = sf['lag_dw']
 
     DV, DU = np.meshgrid(lag_dv, lag_du, indexing='ij')
-    mask = fit['fit_mask'] if fit is not None else np.isfinite(s2_arr)
+    mask = (fit['fit_weight'] > 0) if fit is not None else np.isfinite(s2_arr)
 
     if ellipsoidal and fit is not None:
         p = fit['params']
@@ -707,8 +984,8 @@ def plot_s2_1d(sf, fit=None, ellipsoidal=False, ax=None, **scatter_kwargs):
 
 
 def _make_thumbnail_axes(sf, fit, subplot_spec,
-                          uv_range=0.2, vmin_sf=1e-4, vmax_sf=5e-3,
-                          vdiff=1e-4):
+                          uv_range=0.2, vmin_sf=1e-4, vmax_sf=None,
+                          vdiff=0.3, weighted_diff=False):
     """
     Populate a region (given by subplot_spec or None for a new figure) with
     the 5x9 thumbnail grid.  Returns the figure and the axes array.
@@ -717,13 +994,18 @@ def _make_thumbnail_axes(sf, fit, subplot_spec,
     lag_du   = sf['lag_du']
     lag_dv   = sf['lag_dv']
     pairs    = sf['epoch_pairs']
-    s2_pred  = fit['s2_pred']
-    fit_mask = fit['fit_mask']
-    n_pairs  = len(pairs)
+    s2_pred    = fit['s2_pred']
+    fit_weight = fit['fit_weight']
+    fit_mask   = fit_weight > 0
+    n_pairs    = len(pairs)
 
     pairs_per_row = 3
     n_rows = (n_pairs + pairs_per_row - 1) // pairs_per_row
     n_cols = pairs_per_row * 3   # 9
+
+    if vmax_sf is None:
+        p = fit['params']
+        vmax_sf = p.get('var_inf', p.get('A', 5e-3))
 
     fig = plt.gcf()
     if subplot_spec is None:
@@ -736,14 +1018,36 @@ def _make_thumbnail_axes(sf, fit, subplot_spec,
                       for c in range(n_cols)]
                      for r in range(n_rows)])
 
-    diff_arr = np.array(
-        [(s2_arr[k] - s2_pred[k]) * fit_mask[k] for k in range(n_pairs)])
+    log_diff = np.full_like(s2_arr, np.nan)
+    for k in range(n_pairs):
+        m = fit_mask[k]
+        raw = np.where(
+            m,
+            np.log10(np.maximum(s2_arr[k],  vmin_sf))
+            - np.log10(np.maximum(s2_pred[k], vmin_sf)),
+            np.nan)
+        if weighted_diff:
+            log_diff[k] = np.where(m, np.sqrt(fit_weight[k]) * raw, np.nan)
+        else:
+            log_diff[k] = raw
     type_data = [('S2', s2_arr, False), ('pred', s2_pred, False),
-                 ('diff', diff_arr, True)]
+                 ('diff', log_diff, True)]
+
+    # Pre-compute mask overlay (white tint on excluded pixels)
+    du_step = lag_du[1] - lag_du[0]
+    dv_step = lag_dv[1] - lag_dv[0]
+    mask_extent = [lag_du[0] - du_step / 2, lag_du[-1] + du_step / 2,
+                   lag_dv[0] - dv_step / 2, lag_dv[-1] + dv_step / 2]
 
     for k in range(n_pairs):
         row   = k // pairs_per_row
         group = k % pairs_per_row
+
+        # RGBA overlay: white at 35% alpha where excluded, transparent elsewhere
+        excl = ~fit_mask[k]                          # (n_lag_v, n_lag_u)
+        overlay = np.zeros((*excl.shape, 4))
+        overlay[excl] = [1.0, 0.0, 0.0, 0.35]
+
         for ti, (_, images, is_diff) in enumerate(type_data):
             col = group * 3 + ti
             ax  = axes[row, col]
@@ -754,6 +1058,8 @@ def _make_thumbnail_axes(sf, fit, subplot_spec,
             else:
                 util_efs.imshow(images[k].T, lag_du, lag_dv, log=True,
                                 vmin=vmin_sf, vmax=vmax_sf, cmap='binary')
+            ax.imshow(overlay, extent=mask_extent, origin='lower',
+                      aspect='auto', interpolation='nearest')
             ax.set_xlim(-uv_range, uv_range)
             ax.set_ylim(-uv_range, uv_range)
             ax.tick_params(left=False, bottom=False,
@@ -780,12 +1086,14 @@ def _make_thumbnail_axes(sf, fit, subplot_spec,
 
 def _chunk_suptitle(fit, chunk_id):
     """Return the standard suptitle string for a chunk."""
-    fitres  = fit['fit']
-    resid   = fitres.fun
-    chi2dof = float(np.sum(resid**2)) / max(len(resid) - len(fitres.x), 1)
-    n_pts   = len(fit['log_s2_obs'])
-    a1, a2, a3, theta, phi, psi, alpha = principal_axes_from_params(
-        fit['params'])
+    fitres     = fit['fit']
+    resid      = fitres.fun
+    sum_w      = float(fit['fit_weight'][fit['fit_weight'] > 0].sum())
+    chi2dof    = float(np.sum(resid**2)) / sum_w
+    n_pts      = len(fit['log_s2_obs'])
+    ax = principal_axes_from_params(fit['params'])
+    a1, a2, a3 = ax['a1'], ax['a2'], ax['a3']
+    theta, phi = ax['theta'], ax['phi']
     return (
         f"chunk {chunk_id}   "
         f"$\\chi^2$/dof={chi2dof:.2f}   "
@@ -799,8 +1107,8 @@ def _chunk_suptitle(fit, chunk_id):
 
 
 def plot_s2_thumbnails(sf, fit, chunk_id=None, figsize=(18, 10),
-                       uv_range=0.2, vmin_sf=1e-4, vmax_sf=5e-3,
-                       vdiff=1e-4):
+                       uv_range=0.2, vmin_sf=1e-4, vmax_sf=None,
+                       vdiff=0.3, weighted_diff=False):
     """
     Standalone thumbnail grid for one chunk: 5 rows x 9 cols, no spacing.
 
@@ -821,14 +1129,16 @@ def plot_s2_thumbnails(sf, fit, chunk_id=None, figsize=(18, 10),
     fig = plt.figure(figsize=figsize)
     _make_thumbnail_axes(sf, fit, subplot_spec=None,
                          uv_range=uv_range, vmin_sf=vmin_sf,
-                         vmax_sf=vmax_sf, vdiff=vdiff)
+                         vmax_sf=vmax_sf, vdiff=vdiff,
+                         weighted_diff=weighted_diff)
     fig.suptitle(_chunk_suptitle(fit, chunk_id), fontsize=7)
     fig.subplots_adjust(top=0.93, left=0.08, right=0.99, bottom=0.01)
     return fig
 
 
 def plot_full_page(sf, fit, data, chunk_id=None, figsize=(8.5, 11),
-                   uv_range=0.2, vmin_sf=1e-4, vmax_sf=5e-3, vdiff=1e-4):
+                   uv_range=0.35, vmin_sf=1e-4, vmax_sf=None, vdiff=0.3,
+                   weighted_diff=False, newfig=False):
     """
     Full-page summary for one chunk.
 
@@ -843,8 +1153,12 @@ def plot_full_page(sf, fit, data, chunk_id=None, figsize=(8.5, 11),
     chunk_id      : label for the suptitle
     figsize       : matplotlib figsize
     uv_range, vmin_sf, vmax_sf, vdiff : passed to thumbnail grid
+    newfig        : make a new figure?
     """
-    fig = plt.figure(figsize=figsize)
+    if newfig:
+        fig = plt.figure(figsize=figsize)
+    else:
+        fig = plt.gcf()
 
     # Outer: 3 rows (thumbnails / 1-D plots / RGB), 3 cols so RGB can be
     # centred by occupying the middle column only.
@@ -856,7 +1170,8 @@ def plot_full_page(sf, fit, data, chunk_id=None, figsize=(8.5, 11),
     # Thumbnails span the full width of the top row
     _make_thumbnail_axes(sf, fit, subplot_spec=outer[0, :],
                          uv_range=uv_range, vmin_sf=vmin_sf,
-                         vmax_sf=vmax_sf, vdiff=vdiff)
+                         vmax_sf=vmax_sf, vdiff=vdiff,
+                         weighted_diff=weighted_diff)
 
     # 1-D SF plots: split the full-width row into two equal halves
     inner_1d = gridspec.GridSpecFromSubplotSpec(
@@ -868,8 +1183,40 @@ def plot_full_page(sf, fit, data, chunk_id=None, figsize=(8.5, 11),
     plot_s2_1d(sf, fit, ellipsoidal=True, ax=ax_ell)
     ax_ell.set_title('$S_2$ vs ellipsoidal radius', fontsize=8)
 
-    # RGB composite: centred, using only the middle column
-    ax_rgb = fig.add_subplot(outer[2, 1])
+    # Bottom row: individual epoch images (smushed) + RGB composite
+    flux    = data['flux_epochs']   # (n_epochs, n_v, n_u)
+    W_vals  = data['W_values']
+    n_ep    = flux.shape[0]
+    U_grid  = data['U_grid']
+    V_grid  = data['V_grid']
+    du_im   = float(np.median(np.diff(U_grid[0])))
+    dv_im   = float(np.median(np.diff(V_grid[:, 0])))
+    ext_im  = [U_grid[0, 0] - du_im/2, U_grid[0, -1] + du_im/2,
+               V_grid[0, 0] - dv_im/2, V_grid[-1, 0] + dv_im/2]
+
+    # Common percentile normalisation across all epochs
+    finite_all = flux[np.isfinite(flux)]
+    lo_ep, hi_ep = (np.percentile(finite_all, [2, 99])
+                    if len(finite_all) else (0, 1))
+
+    # Width ratio: each epoch image ~ same width as RGB, RGB gets 2× weight
+    bot_gs = gridspec.GridSpecFromSubplotSpec(
+        1, n_ep + 1, subplot_spec=outer[2, :],
+        width_ratios=[1] * n_ep + [2],
+        wspace=0.04)
+
+    for ep in range(n_ep):
+        ax_ep = fig.add_subplot(bot_gs[0, ep])
+        ch = np.clip(flux[ep].astype(float), lo_ep, hi_ep)
+        ch = (ch - lo_ep) / max(hi_ep - lo_ep, 1e-30)
+        ch[~np.isfinite(flux[ep])] = 0.0
+        ax_ep.imshow(ch, extent=ext_im, origin='lower', aspect='equal',
+                     cmap='gray', vmin=0, vmax=1)
+        ax_ep.set_title(f'ep {ep}\nW={W_vals[ep]-W_vals[0]:.2f}', fontsize=6)
+        ax_ep.xaxis.set_ticklabels([])
+        ax_ep.yaxis.set_ticklabels([])
+
+    ax_rgb = fig.add_subplot(bot_gs[0, n_ep])
     plot_rgb_epochs(data, fit, ax=ax_rgb)
 
     fig.suptitle(_chunk_suptitle(fit, chunk_id), fontsize=8)
@@ -920,13 +1267,14 @@ def plot_rgb_epochs(data, fit, ax=None, percentile_clip=(5, 99)):
         ch[~np.isfinite(flux[c])] = 0.0
         rgb[..., c] = ch
 
-    # Expected motion vectors
-    a1, a2, a3, theta, phi, psi, alpha = principal_axes_from_params(
-        fit['params'])
+    # Expected motion vectors: UV location of S2 minimum at given dW slice,
+    # i.e. (l13/s33, l23/s33) * dW from minimizing |L^-1 lag| over (dU, dV).
+    p = fit['params']
+    du_per_dw = p['l13'] / p['s33']
+    dv_per_dw = p['l23'] / p['s33']
 
     def motion_uv(dw):
-        return np.array([dw * np.sin(theta) / np.cos(theta) * np.cos(phi),
-                         dw * np.sin(theta) / np.cos(theta) * np.sin(phi)])
+        return np.array([du_per_dw * dw, dv_per_dw * dw])
 
     dW_01 = float(W_vals[1] - W_vals[0])
     dW_12 = float(W_vals[2] - W_vals[1])
@@ -966,6 +1314,156 @@ def plot_rgb_epochs(data, fit, ax=None, percentile_clip=(5, 99)):
     ax.xaxis.set_ticklabels([])
     ax.yaxis.set_ticklabels([])
     return ax
+
+
+# ---------------------------------------------------------------------------
+# Parallel batch processing
+# ---------------------------------------------------------------------------
+
+def _process_chunk(args):
+    fn, max_nfev, background, arcsinh_scale, profile, weighting = args
+    try:
+        data = read_chunk(fn)
+        sf   = compute_s2(data, background=background, arcsinh_scale=arcsinh_scale)
+        fit  = fit_s2(sf, profile=profile, max_nfev=max_nfev, weighting=weighting)
+        return fn, dict(sf=sf, fit=fit)
+    except Exception as exc:
+        return fn, exc
+
+
+def process_chunks(fns, n_workers=None, max_nfev=None,
+                   background=0.03, arcsinh_scale=0.03, profile=None,
+                   weighting='1/r'):
+    """
+    Run read_chunk -> compute_s2 -> fit_s2 on each file in parallel.
+
+    Returns a dict mapping filename -> {'sf': ..., 'fit': ...}.
+    Failed chunks are printed and omitted from the result.
+    """
+    import multiprocessing
+    try:
+        import tqdm
+        wrap = lambda it, **kw: tqdm.tqdm(it, **kw)
+    except ImportError:
+        wrap = lambda it, **kw: it
+
+    args = [(fn, max_nfev, background, arcsinh_scale, profile, weighting) for fn in fns]
+    with multiprocessing.Pool(n_workers) as pool:
+        items = list(wrap(
+            pool.imap_unordered(_process_chunk, args),
+            total=len(args)))
+
+    res = {}
+    for fn, val in items:
+        if isinstance(val, Exception):
+            print(f"FAILED {fn}: {val}")
+        else:
+            res[fn] = val
+    return res
+
+
+# ---------------------------------------------------------------------------
+# Summary table
+# ---------------------------------------------------------------------------
+
+def summarize_chunks(res, profile=None):
+    """
+    Build a numpy structured array summarising one entry per chunk from the
+    dict returned by process_chunks().
+
+    Fields
+    ------
+    chunk_id   : integer parsed from filename
+    chunk_name : filename string (up to 128 chars)
+    u_mean, v_mean, w_mean : mean spatial coordinates of the chunk [ly]
+    du_per_dw, dv_per_dw   : apparent UV drift rate [ly / ly] = l13/s33, l23/s33;
+                             use for quiver(u_mean, v_mean, du_per_dw, dv_per_dw)
+    s11..var_inf           : raw fitted L-matrix parameters and Weibull params
+    a1, a2, a3             : principal semi-axes [ly], descending
+    theta, phi, psi        : orientation of a1 [deg]; theta from W, phi in UV plane
+    a2_over_a1, a3_over_a1 : axis ratios (elongation diagnostics)
+    chi2_dof               : reduced chi-squared of the fit
+    n_pts                  : number of lag points used in fit
+    fit_success            : scipy optimizer success flag
+    n_epochs               : number of flux epochs in the chunk
+    w_span                 : max(W) - min(W) [ly]
+    """
+    import re
+
+    if profile is None:
+        profile = weibull_log_s2
+
+    dtype = np.dtype([
+        ('chunk_id',     'i4'),
+        ('chunk_name',   'U128'),
+        ('u_mean',       'f8'),
+        ('v_mean',       'f8'),
+        ('w_mean',       'f8'),
+        ('du_per_dw',    'f8'),
+        ('dv_per_dw',    'f8'),
+        ('s11',          'f8'),
+        ('s22',          'f8'),
+        ('s33',          'f8'),
+        ('l12',          'f8'),
+        ('l13',          'f8'),
+        ('l23',          'f8'),
+    ] + [(name, 'f8') for name in profile.param_names] + [
+        ('a1',           'f8'),
+        ('a2',           'f8'),
+        ('a3',           'f8'),
+        ('theta',        'f8'),
+        ('phi',          'f8'),
+        ('psi',          'f8'),
+        ('chi2_dof',     'f8'),
+        ('n_pts',        'i4'),
+        ('fit_success',  '?'),
+        ('n_epochs',     'i4'),
+        ('w_span',       'f8'),
+    ])
+
+    rows = []
+    for fn, val in res.items():
+        sf  = val['sf']
+        fit = val['fit']
+        p   = fit['params']
+
+        m = re.search(r'uvw_chunk_(\d+)_products', fn)
+        chunk_id = int(m.group(1)) if m else -1
+
+        u_mean   = sf['u_mean']
+        v_mean   = sf['v_mean']
+        w_mean   = sf['w_mean']
+        W_values = sf['w_values']
+        w_span   = float(W_values.max() - W_values.min())
+        n_epochs = sum(1 for i, j in sf['epoch_pairs'] if i == j)
+
+        ax = principal_axes_from_params(p)
+        a1, a2, a3 = ax['a1'], ax['a2'], ax['a3']
+        theta, phi, psi = ax['theta'], ax['phi'], ax['psi']
+
+        fitres   = fit['fit']
+        resid    = fitres.fun
+        n_pts    = len(fit['log_s2_obs'])
+        fw       = fit['fit_weight']
+        sum_w    = float(fw[fw > 0].sum())
+        chi2_dof = float(np.sum(resid**2)) / sum_w
+
+        prof_vals = tuple(p[name] for name in profile.param_names)
+        rows.append((
+            chunk_id, fn,
+            u_mean, v_mean, w_mean,
+            p['l13'] / p['s33'], p['l23'] / p['s33'],
+            p['s11'], p['s22'], p['s33'],
+            p['l12'], p['l13'], p['l23'],
+            *prof_vals,
+            a1, a2, a3,
+            np.degrees(theta), np.degrees(phi), np.degrees(psi),
+            chi2_dof, n_pts, bool(fitres.success),
+            n_epochs, w_span,
+        ))
+
+    out = np.array(rows, dtype=dtype)
+    return out[np.argsort(out['chunk_id'])]
 
 
 # ---------------------------------------------------------------------------
