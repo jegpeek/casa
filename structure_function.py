@@ -351,7 +351,7 @@ def get_sf_2d(image):
 def weibull_log_s2(r, params):
     """S2 = var_inf * (1 - exp(-r^beta))^(alpha/beta)"""
     alpha, beta, var_inf = params
-    weibull = np.maximum(1.0 - np.exp(-r ** beta), 1e-300)
+    weibull = np.maximum(-np.expm1(-r ** beta), 1e-300)
     return np.log10(var_inf) + (alpha / beta) * np.log10(weibull)
 
 weibull_log_s2.n_params      = 3
