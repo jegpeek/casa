@@ -945,9 +945,13 @@ def fit_s2(result: dict,
             best_chi2, best_scale = _chi2, _s
     auto_geom = params_from_uvshift(du, dv, scale=best_scale, elongation=5.0)
     geom_p0 = [g.get(k, auto_geom[k]) for k in _GEOM_KEYS]
-    prof_p0  = [g.get(name, (amp_guess if default is None else default))
-                for name, default in zip(profile.param_names,
-                                         profile.default_guess)]
+    prof_bounds = getattr(profile, 'param_bounds',
+                          [(-np.inf, np.inf)] * profile.n_params)
+    prof_p0  = [np.clip(g.get(name, (amp_guess if default is None else default)),
+                        b[0], b[1])
+                for name, default, b in zip(profile.param_names,
+                                            profile.default_guess,
+                                            prof_bounds)]
     p0 = np.array(geom_p0 + prof_p0)
 
     sqrt_w = np.sqrt(_point_weights(lags_flat, result, weighting))
@@ -956,8 +960,6 @@ def fit_s2(result: dict,
     # prevent collapse to the degenerate s→0 minimum.  Profile params with
     # positive bounds are also log-transformed.
     _N_LOG = 3   # first 3 geom params (s11, s22, s33)
-    prof_bounds = getattr(profile, 'param_bounds',
-                          [(-np.inf, np.inf)] * profile.n_params)
     _prof_log = [b[0] > 0 for b in prof_bounds]   # which prof params to log
 
     def _to_opt(p):
