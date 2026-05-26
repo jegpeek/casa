@@ -1129,7 +1129,7 @@ def _make_thumbnail_axes(sf, fit, subplot_spec,
 
     log_diff = np.full_like(s2_arr, np.nan)
     for k in range(n_pairs):
-        m = fit_mask[k]
+        m = display_mask[k]
         raw = np.where(
             m,
             np.log10(np.maximum(s2_arr[k],  vmin_sf))
