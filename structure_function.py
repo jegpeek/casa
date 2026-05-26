@@ -792,13 +792,21 @@ def _make_fit_data(sf, inner_uv_pixels, min_same_epoch_lag_pix, s2_floor,
 
 
 def _point_weights(lags_flat, sf, weighting):
-    """Per-point weights w_i; objective = sum(w_i*(obs-pred)^2/sigma^2)."""
+    """Per-point weights w_i; objective = sum(w_i*(obs-pred)^2/sigma^2).
+
+    '1/r'  — constant weight per radial bin (2π r dr × 1/r = const)
+    '1/r2' — constant weight per log radial bin (2π r dr × 1/r² = d ln r)
+    None   — uniform
+    """
     if weighting is None:
         return np.ones(len(lags_flat))
-    if weighting == '1/r':
+    if weighting in ('1/r', '1/r2'):
         r_uv = np.hypot(lags_flat[:, 0], lags_flat[:, 1])
         lag_step = float(abs(sf['lag_du'][1] - sf['lag_du'][0]))
-        return 1.0 / np.maximum(r_uv, lag_step)
+        r_clamp = np.maximum(r_uv, lag_step)
+        if weighting == '1/r':
+            return 1.0 / r_clamp
+        return 1.0 / r_clamp ** 2
     raise ValueError(f"Unknown weighting: {weighting!r}")
 
 
@@ -851,9 +859,10 @@ def build_fit_result(sf, params, profile=None,
     # Build 3D fit_weight: 0 where excluded, w_i where included.
     lag_du, lag_dv = sf['lag_du'], sf['lag_dv']
     DV_full, DU_full = np.meshgrid(lag_dv, lag_du, indexing='ij')
-    if weighting == '1/r':
+    if weighting in ('1/r', '1/r2'):
         lag_step = float(abs(lag_du[1] - lag_du[0]))
-        w_2d = 1.0 / np.maximum(np.hypot(DU_full, DV_full), lag_step)
+        r_clamp = np.maximum(np.hypot(DU_full, DV_full), lag_step)
+        w_2d = 1.0 / r_clamp if weighting == '1/r' else 1.0 / r_clamp ** 2
     else:
         w_2d = np.ones_like(DU_full)
     fit_weight = (fit_mask * w_2d).astype(np.float32)
