@@ -357,7 +357,7 @@ def weibull_log_s2(r, params):
 weibull_log_s2.n_params      = 3
 weibull_log_s2.param_names   = ['alpha', 'beta', 'var_inf']
 weibull_log_s2.default_guess = [0.4, 2.0, None]   # None → data-driven
-weibull_log_s2.param_bounds  = [(1e-3, np.inf), (1.0, np.inf), (1e-6, np.inf)]
+weibull_log_s2.param_bounds  = [(1e-3, np.inf), (1.0, np.inf), (1e-6, 3.0)]
 
 
 def broken_pl_log_s2(r, params):
@@ -958,10 +958,12 @@ def fit_s2(result: dict,
         return p
 
     # Build bounds in the transformed (q) space.
-    # Geometry: s11/s22/s33 log-transformed (no finite lower bound needed);
-    #           l12/l13/l23 unconstrained.
-    geom_lo = [-np.inf] * _N_GEOM
-    geom_hi = [ np.inf] * _N_GEOM
+    # s11/s22/s33 are log-transformed; bound them to [0, 10] ly.
+    # l12/l13/l23 are unconstrained.
+    _S_MAX = 10.0
+    geom_lo = [-np.inf, -np.inf, -np.inf, -np.inf, -np.inf, -np.inf]
+    geom_hi = [np.log(_S_MAX), np.log(_S_MAX), np.log(_S_MAX),
+               np.inf, np.inf, np.inf]
     prof_lo = [np.log(b[0]) if do_log else b[0]
                for b, do_log in zip(prof_bounds, _prof_log)]
     prof_hi = [np.log(b[1]) if (do_log and np.isfinite(b[1])) else b[1]
