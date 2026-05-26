@@ -763,7 +763,8 @@ def _make_fit_data(sf, inner_uv_pixels, min_same_epoch_lag_pix, s2_floor,
         stride_mask = None
 
     dU_list, dV_list, dW_list, log_s2_list = [], [], [], []
-    fit_mask = np.zeros((n_pairs, n_lag_v, n_lag_u), dtype=bool)
+    fit_mask     = np.zeros((n_pairs, n_lag_v, n_lag_u), dtype=bool)
+    display_mask = np.zeros((n_pairs, n_lag_v, n_lag_u), dtype=bool)
 
     for k, (i, j) in enumerate(epoch_pairs):
         plane = s2_arr[k, v_sl, u_sl]
@@ -772,6 +773,7 @@ def _make_fit_data(sf, inner_uv_pixels, min_same_epoch_lag_pix, s2_floor,
         mask  = np.isfinite(plane) & (n_win >= min_n_fraction * n_max)
         if i == j:
             mask &= ~near_zero
+        display_mask[k, v_sl, u_sl] = mask
         if stride_mask is not None:
             mask &= stride_mask
         fit_mask[k, v_sl, u_sl] = mask
@@ -786,7 +788,7 @@ def _make_fit_data(sf, inner_uv_pixels, min_same_epoch_lag_pix, s2_floor,
                                   np.concatenate(dV_list),
                                   np.concatenate(dW_list)])
     log_s2_obs = np.concatenate(log_s2_list)
-    return fit_mask, lags_flat, log_s2_obs
+    return fit_mask, display_mask, lags_flat, log_s2_obs
 
 
 def _point_weights(lags_flat, sf, weighting):
@@ -836,7 +838,7 @@ def build_fit_result(sf, params, profile=None,
     params_dict = {**dict(zip(_GEOM_KEYS, params_arr[:_N_GEOM])),
                    **dict(zip(profile.param_names, params_arr[_N_GEOM:]))}
 
-    fit_mask, lags_flat, log_s2_obs = _make_fit_data(
+    fit_mask, display_mask, lags_flat, log_s2_obs = _make_fit_data(
         sf, inner_uv_pixels, min_same_epoch_lag_pix, s2_floor, min_n_fraction,
         fit_stride)
 
@@ -857,14 +859,15 @@ def build_fit_result(sf, params, profile=None,
     fit_weight = (fit_mask * w_2d).astype(np.float32)
 
     return {
-        'fit':        mock_fit,
-        'params':     params_dict,
-        'profile':    profile,
-        'weighting':  weighting,
-        's2_pred':    predict_s2(params_arr, sf['lag_du'], sf['lag_dv'],
-                                 sf['lag_dw'], profile=profile),
-        'fit_weight': fit_weight,
-        'log_s2_obs': log_s2_obs,
+        'fit':          mock_fit,
+        'params':       params_dict,
+        'profile':      profile,
+        'weighting':    weighting,
+        's2_pred':      predict_s2(params_arr, sf['lag_du'], sf['lag_dv'],
+                                   sf['lag_dw'], profile=profile),
+        'fit_weight':   fit_weight,
+        'display_mask': display_mask,
+        'log_s2_obs':   log_s2_obs,
     }
 
 
@@ -902,7 +905,7 @@ def fit_s2(result: dict,
     if profile is None:
         profile = weibull_log_s2
 
-    fit_mask, lags_flat, log_s2_obs = _make_fit_data(
+    fit_mask, display_mask, lags_flat, log_s2_obs = _make_fit_data(
         result, inner_uv_pixels, min_same_epoch_lag_pix, s2_floor,
         min_n_fraction, fit_stride)
 
@@ -1099,9 +1102,10 @@ def _make_thumbnail_axes(sf, fit, subplot_spec,
     lag_du   = sf['lag_du']
     lag_dv   = sf['lag_dv']
     pairs    = sf['epoch_pairs']
-    s2_pred    = fit['s2_pred']
-    fit_weight = fit['fit_weight']
-    fit_mask   = fit_weight > 0
+    s2_pred      = fit['s2_pred']
+    fit_weight   = fit['fit_weight']
+    fit_mask     = fit_weight > 0
+    display_mask = fit.get('display_mask', fit_mask)
     n_pairs    = len(pairs)
 
     pairs_per_row = 3
@@ -1148,8 +1152,8 @@ def _make_thumbnail_axes(sf, fit, subplot_spec,
         row   = k // pairs_per_row
         group = k % pairs_per_row
 
-        # RGBA overlay: white at 35% alpha where excluded, transparent elsewhere
-        excl = ~fit_mask[k]                          # (n_lag_v, n_lag_u)
+        # RGBA overlay: red at 35% alpha where excluded by real mask (not stride)
+        excl = ~display_mask[k]                      # (n_lag_v, n_lag_u)
         overlay = np.zeros((*excl.shape, 4))
         overlay[excl] = [1.0, 0.0, 0.0, 0.35]
 
