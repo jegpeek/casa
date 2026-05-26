@@ -29,6 +29,7 @@ from itertools import combinations
 import scipy.linalg
 import scipy.ndimage
 from scipy.optimize import least_squares
+import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import matplotlib.patches as mpatches
@@ -1165,37 +1166,41 @@ def _make_thumbnail_axes(sf, fit, subplot_spec,
     type_data = [('S2', s2_arr, False), ('pred', s2_pred, False),
                  ('diff', log_diff, True)]
 
-    # Pre-compute mask overlay (white tint on excluded pixels)
     du_step = lag_du[1] - lag_du[0]
     dv_step = lag_dv[1] - lag_dv[0]
-    mask_extent = [lag_du[0] - du_step / 2, lag_du[-1] + du_step / 2,
-                   lag_dv[0] - dv_step / 2, lag_dv[-1] + dv_step / 2]
+    extent = [lag_du[0] - du_step/2, lag_du[-1] + du_step/2,
+              lag_dv[0] - dv_step/2, lag_dv[-1] + dv_step/2]
+
+    cmap = plt.get_cmap('binary')
+    norm_log  = matplotlib.colors.LogNorm(vmin=vmin_sf, vmax=vmax_sf)
+    norm_lin  = matplotlib.colors.Normalize(vmin=-vdiff, vmax=vdiff)
+    _OV_ALPHA = 0.35  # red overlay alpha
 
     for k in range(n_pairs):
         row   = k // pairs_per_row
         group = k % pairs_per_row
-
-        # RGBA overlay: red at 35% alpha where excluded by real mask (not stride)
-        excl = ~display_mask[k]                      # (n_lag_v, n_lag_u)
-        overlay = np.zeros((*excl.shape, 4))
-        overlay[excl] = [1.0, 0.0, 0.0, 0.35]
+        excl  = ~display_mask[k]   # (n_lag_v, n_lag_u)
 
         for ti, (_, images, is_diff) in enumerate(type_data):
             col = group * 3 + ti
             ax  = axes[row, col]
-            plt.sca(ax)
-            if is_diff:
-                util_efs.imshow(images[k].T, lag_du, lag_dv,
-                                vmin=-vdiff, vmax=vdiff, cmap='binary')
-            else:
-                util_efs.imshow(images[k].T, lag_du, lag_dv, log=True,
-                                vmin=vmin_sf, vmax=vmax_sf, cmap='binary')
-            ax.imshow(overlay, extent=mask_extent, origin='lower',
+
+            # Apply colormap in numpy, then alpha-blend red exclusion mask —
+            # single imshow call per panel instead of two.
+            im = images[k]                             # (n_lag_v, n_lag_u)
+            norm = norm_lin if is_diff else norm_log
+            rgba = cmap(norm(np.where(np.isfinite(im), im, np.nan)))
+            rgba = rgba.copy()
+            rgba[excl, 0] = _OV_ALPHA + (1-_OV_ALPHA) * rgba[excl, 0]
+            rgba[excl, 1] = (1-_OV_ALPHA) * rgba[excl, 1]
+            rgba[excl, 2] = (1-_OV_ALPHA) * rgba[excl, 2]
+
+            ax.imshow(rgba, extent=extent, origin='lower',
                       aspect='auto', interpolation='nearest')
             ax.set_xlim(-uv_range, uv_range)
             ax.set_ylim(-uv_range, uv_range)
-            ax.tick_params(left=False, bottom=False,
-                           labelleft=False, labelbottom=False)
+            ax.set_xticks([])
+            ax.set_yticks([])
 
     # Hide unused cells
     for k in range(n_pairs, n_rows * pairs_per_row):
