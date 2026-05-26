@@ -1407,8 +1407,9 @@ def plot_rgb_epochs(data, fit, ax=None, percentile_clip=(5, 99)):
 # Parallel batch processing
 # ---------------------------------------------------------------------------
 
-def _process_chunk(args):
-    fn, max_nfev, background, arcsinh_scale, profile, weighting, min_n_fraction, fit_stride = args
+def _process_chunk(fn, max_nfev=None, background=0.03, arcsinh_scale=0.03,
+                   profile=None, weighting='1/r', min_n_fraction=0.1,
+                   fit_stride=1):
     try:
         data = read_chunk(fn)
         sf   = compute_s2(data, background=background, arcsinh_scale=arcsinh_scale)
@@ -1429,17 +1430,21 @@ def process_chunks(fns, n_workers=None, max_nfev=None,
     Failed chunks are printed and omitted from the result.
     """
     import multiprocessing
+    from functools import partial
     try:
         import tqdm
         wrap = lambda it, **kw: tqdm.tqdm(it, **kw)
     except ImportError:
         wrap = lambda it, **kw: it
 
-    args = [(fn, max_nfev, background, arcsinh_scale, profile, weighting, min_n_fraction, fit_stride) for fn in fns]
+    worker = partial(_process_chunk, max_nfev=max_nfev, background=background,
+                     arcsinh_scale=arcsinh_scale, profile=profile,
+                     weighting=weighting, min_n_fraction=min_n_fraction,
+                     fit_stride=fit_stride)
     with multiprocessing.Pool(n_workers) as pool:
         items = list(wrap(
-            pool.imap_unordered(_process_chunk, args),
-            total=len(args)))
+            pool.imap_unordered(worker, fns),
+            total=len(fns)))
 
     res = {}
     for fn, val in items:
