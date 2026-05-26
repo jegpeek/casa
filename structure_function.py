@@ -357,7 +357,7 @@ def weibull_log_s2(r, params):
 weibull_log_s2.n_params      = 3
 weibull_log_s2.param_names   = ['alpha', 'beta', 'var_inf']
 weibull_log_s2.default_guess = [0.4, 2.0, None]   # None → data-driven
-weibull_log_s2.param_bounds  = [(1e-3, np.inf), (1e-3, np.inf), (1e-6, np.inf)]
+weibull_log_s2.param_bounds  = [(1e-3, np.inf), (1.0, np.inf), (1e-6, np.inf)]
 
 
 def broken_pl_log_s2(r, params):
@@ -957,6 +957,18 @@ def fit_s2(result: dict,
                 p[_N_GEOM + i] = np.exp(q[_N_GEOM + i])
         return p
 
+    # Build bounds in the transformed (q) space.
+    # Geometry: s11/s22/s33 log-transformed (no finite lower bound needed);
+    #           l12/l13/l23 unconstrained.
+    geom_lo = [-np.inf] * _N_GEOM
+    geom_hi = [ np.inf] * _N_GEOM
+    prof_lo = [np.log(b[0]) if do_log else b[0]
+               for b, do_log in zip(prof_bounds, _prof_log)]
+    prof_hi = [np.log(b[1]) if (do_log and np.isfinite(b[1])) else b[1]
+               for b, do_log in zip(prof_bounds, _prof_log)]
+    q_lo = np.array(geom_lo + prof_lo)
+    q_hi = np.array(geom_hi + prof_hi)
+
     q0 = _to_opt(p0)
 
     def _residuals(q):
@@ -972,12 +984,13 @@ def fit_s2(result: dict,
         return _residuals(np.concatenate([geom_q0, prof_q]))
 
     pre = least_squares(_residuals_profile, prof_q0, loss='soft_l1',
-                        f_scale=1.0, max_nfev=200)
+                        f_scale=1.0, max_nfev=200,
+                        bounds=(q_lo[_N_GEOM:], q_hi[_N_GEOM:]))
     q0 = np.concatenate([geom_q0, pre.x])
 
     # Stage 2: full optimisation from the pre-warmed starting point.
     fit = least_squares(_residuals, q0, loss='soft_l1', f_scale=1.0,
-                        max_nfev=max_nfev)
+                        max_nfev=max_nfev, bounds=(q_lo, q_hi))
 
     fit_params = _from_opt(fit.x)
 
