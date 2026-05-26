@@ -997,6 +997,7 @@ def fit_s2(result: dict,
                            min_n_fraction=min_n_fraction,
                            fit_stride=fit_stride,
                            weighting=weighting)
+    out['collapsed'] = collapsed
     if not collapsed:
         out['fit'] = fit   # replace mock with real optimizer result
     return out
@@ -1198,6 +1199,7 @@ def _chunk_suptitle(fit, chunk_id):
     ax = principal_axes_from_params(fit['params'])
     a1, a2, a3 = ax['a1'], ax['a2'], ax['a3']
     theta, phi = ax['theta'], ax['phi']
+    collapsed_str = "  [FALLBACK]" if fit.get('collapsed') else ""
     return (
         f"chunk {chunk_id}   "
         f"$\\chi^2$/dof={chi2dof:.2f}   "
@@ -1207,6 +1209,7 @@ def _chunk_suptitle(fit, chunk_id):
         f"$a_3/a_1$={a3/a1:.2f}   "
         f"$\\theta$={np.degrees(theta):.1f}$^\\circ$   "
         f"$\\phi$={np.degrees(phi):.1f}$^\\circ$"
+        f"{collapsed_str}"
     )
 
 
@@ -1527,6 +1530,7 @@ def summarize_chunks(res, profile=None):
         ('chi2_dof',     'f8'),
         ('n_pts',        'i4'),
         ('fit_success',  '?'),
+        ('collapsed',    '?'),
         ('n_epochs',     'i4'),
         ('w_span',       'f8'),
     ])
@@ -1569,6 +1573,7 @@ def summarize_chunks(res, profile=None):
             a1, a2, a3,
             np.degrees(theta), np.degrees(phi), np.degrees(psi),
             chi2_dof, n_pts, bool(fitres.success),
+            bool(fit.get('collapsed')),
             n_epochs, w_span,
         ))
 
