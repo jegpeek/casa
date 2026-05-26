@@ -929,10 +929,21 @@ def fit_s2(result: dict,
         du, dv = estimate_uvshift(result)
     except Exception:
         du, dv = 0.0, 0.0
-    # scale=0.3 ly places saturation at the inner-window edge, keeping the
-    # power-law regime well-sampled; elongation=1 forces l13=l23=0 (no shift),
-    # so use 5 instead.
-    auto_geom = params_from_uvshift(du, dv, scale=0.3, elongation=5.0)
+    # Try several scales and pick the one with the lowest chi² at the initial
+    # guess (single evaluation, no optimisation) to avoid basin-of-attraction
+    # sensitivity to the scale parameter.
+    _scales = (0.05, 0.1, 0.2, 0.3)
+    _prof_defaults = [amp_guess if d is None else d
+                      for d in profile.default_guess]
+    best_scale, best_chi2 = _scales[0], np.inf
+    for _s in _scales:
+        _geom = params_from_uvshift(du, dv, scale=_s, elongation=5.0)
+        _p0 = np.array([_geom[k] for k in _GEOM_KEYS] + _prof_defaults)
+        _res = (log_s2_obs - log_s2_model(_p0, lags_flat, profile=profile))
+        _chi2 = float(np.mean(_res ** 2))
+        if _chi2 < best_chi2:
+            best_chi2, best_scale = _chi2, _s
+    auto_geom = params_from_uvshift(du, dv, scale=best_scale, elongation=5.0)
     geom_p0 = [g.get(k, auto_geom[k]) for k in _GEOM_KEYS]
     prof_p0  = [g.get(name, (amp_guess if default is None else default))
                 for name, default in zip(profile.param_names,
