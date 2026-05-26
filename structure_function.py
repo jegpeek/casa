@@ -890,8 +890,7 @@ def fit_s2(result: dict,
            min_n_fraction: float = 0.1,
            fit_stride: int = 2,
            max_nfev: int | None = None,
-           weighting='1/r',
-           allow_collapse: bool = False) -> dict:
+           weighting='1/r') -> dict:
     """
     Fit S2(dU, dV, dW) to the structure function using a pluggable 1D profile.
 
@@ -1005,18 +1004,6 @@ def fit_s2(result: dict,
 
     fit_params = _from_opt(fit.x)
 
-    # Detect degenerate collapse (Cholesky diagonals → 0): any s < ~3 pixels.
-    # The degenerate minimum has lower chi² but is physically meaningless
-    # (ellipsoid collapses to a point, model = var_inf everywhere).  Fall back
-    # to the stage-1 result: initial geometry with profile pre-fitted.
-    lag_step = float(abs(result['lag_du'][1] - result['lag_du'][0]))
-    collapsed = min(fit_params[:3]) < 3 * lag_step
-    if collapsed and not allow_collapse:
-        # Degenerate minimum: fall back to stage-1 result (initial geometry +
-        # pre-fitted profile).  The mock fit in build_fit_result will carry the
-        # correct residuals for these params; don't override with fit.fun.
-        fit_params = _from_opt(np.concatenate([geom_q0, pre.x]))
-
     out = build_fit_result(result, fit_params, profile=profile,
                            inner_uv_pixels=inner_uv_pixels,
                            min_same_epoch_lag_pix=min_same_epoch_lag_pix,
@@ -1025,9 +1012,7 @@ def fit_s2(result: dict,
                            min_n_fraction=min_n_fraction,
                            fit_stride=fit_stride,
                            weighting=weighting)
-    out['collapsed'] = collapsed and not allow_collapse
-    if not collapsed or allow_collapse:
-        out['fit'] = fit   # replace mock with real optimizer result
+    out['fit'] = fit
     return out
 
 
@@ -1228,7 +1213,6 @@ def _chunk_suptitle(fit, chunk_id):
     ax = principal_axes_from_params(fit['params'])
     a1, a2, a3 = ax['a1'], ax['a2'], ax['a3']
     theta, phi = ax['theta'], ax['phi']
-    collapsed_str = "  [FALLBACK]" if fit.get('collapsed') else ""
     return (
         f"chunk {chunk_id}   "
         f"$\\chi^2$/dof={chi2dof:.2f}   "
@@ -1238,7 +1222,6 @@ def _chunk_suptitle(fit, chunk_id):
         f"$a_3/a_1$={a3/a1:.2f}   "
         f"$\\theta$={np.degrees(theta):.1f}$^\\circ$   "
         f"$\\phi$={np.degrees(phi):.1f}$^\\circ$"
-        f"{collapsed_str}"
     )
 
 
@@ -1559,7 +1542,6 @@ def summarize_chunks(res, profile=None):
         ('chi2_dof',     'f8'),
         ('n_pts',        'i4'),
         ('fit_success',  '?'),
-        ('collapsed',    '?'),
         ('n_epochs',     'i4'),
         ('w_span',       'f8'),
     ])
@@ -1602,7 +1584,6 @@ def summarize_chunks(res, profile=None):
             a1, a2, a3,
             np.degrees(theta), np.degrees(phi), np.degrees(psi),
             chi2_dof, n_pts, bool(fitres.success),
-            bool(fit.get('collapsed')),
             n_epochs, w_span,
         ))
 
