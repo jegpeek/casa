@@ -340,6 +340,7 @@ def weibull_log_s2(r, params):
 weibull_log_s2.n_params      = 3
 weibull_log_s2.param_names   = ['alpha', 'beta', 'var_inf']
 weibull_log_s2.default_guess = [0.4, 2.0, None]   # None → data-driven
+weibull_log_s2.param_bounds  = [(1e-3, np.inf), (1e-3, np.inf), (1e-6, np.inf)]
 
 
 def broken_pl_log_s2(r, params):
@@ -358,6 +359,8 @@ def broken_pl_log_s2(r, params):
 broken_pl_log_s2.n_params      = 4
 broken_pl_log_s2.param_names   = ['alpha1', 'alpha2', 'r_b', 'A']
 broken_pl_log_s2.default_guess = [1.0, 0.4, 0.1, 1.0]
+broken_pl_log_s2.param_bounds  = [(1e-3, np.inf), (1e-3, np.inf),
+                                   (1e-4, np.inf), (1e-6, np.inf)]
 
 
 # ---------------------------------------------------------------------------
@@ -702,9 +705,16 @@ def principal_axes_from_params(params):
     return dict(a1=a1, a2=a2, a3=a3, theta=theta, phi=phi, psi=psi)
 
 
-def _make_fit_data(sf, inner_uv_pixels, min_same_epoch_lag_pix, s2_floor):
-    """Select lag points for fitting; shared by fit_s2 and build_fit_result."""
+def _make_fit_data(sf, inner_uv_pixels, min_same_epoch_lag_pix, s2_floor,
+                   min_n_fraction=0.1):
+    """Select lag points for fitting; shared by fit_s2 and build_fit_result.
+
+    min_n_fraction : exclude lags where N < min_n_fraction * max(N) for that
+        pair.  Removes severely under-sampled lags caused by masked image
+        regions without requiring a hand-tuned absolute threshold.
+    """
     s2_arr      = sf['s2']
+    n_counts    = sf['n_counts']
     lag_du      = sf['lag_du']
     lag_dv      = sf['lag_dv']
     lag_dw      = sf['lag_dw']
@@ -729,7 +739,9 @@ def _make_fit_data(sf, inner_uv_pixels, min_same_epoch_lag_pix, s2_floor):
 
     for k, (i, j) in enumerate(epoch_pairs):
         plane = s2_arr[k, v_sl, u_sl]
-        mask  = np.isfinite(plane)
+        n_win = n_counts[k, v_sl, u_sl]
+        n_max = n_counts[k].max()
+        mask  = np.isfinite(plane) & (n_win >= min_n_fraction * n_max)
         if i == j:
             mask &= ~near_zero
         fit_mask[k, v_sl, u_sl] = mask
@@ -763,6 +775,7 @@ def build_fit_result(sf, params, profile=None,
                      min_same_epoch_lag_pix: int = 4,
                      s2_floor: float = 10**-3.75,
                      noise_scale_dex: float = 0.1,
+                     min_n_fraction: float = 0.1,
                      weighting='1/r') -> dict:
     """
     Build the same dict as fit_s2 returns, but from a given params array or
@@ -793,7 +806,7 @@ def build_fit_result(sf, params, profile=None,
                    **dict(zip(profile.param_names, params_arr[_N_GEOM:]))}
 
     fit_mask, lags_flat, log_s2_obs = _make_fit_data(
-        sf, inner_uv_pixels, min_same_epoch_lag_pix, s2_floor)
+        sf, inner_uv_pixels, min_same_epoch_lag_pix, s2_floor, min_n_fraction)
 
     weights_flat = _point_weights(lags_flat, sf, weighting)
     residuals    = (np.sqrt(weights_flat) * (log_s2_obs - log_s2_model(params_arr, lags_flat, profile=profile))
@@ -830,6 +843,7 @@ def fit_s2(result: dict,
            min_same_epoch_lag_pix: int = 4,
            s2_floor: float = 10**-3.75,
            noise_scale_dex: float = 0.1,
+           min_n_fraction: float = 0.1,
            max_nfev: int | None = None,
            weighting='1/r') -> dict:
     """
@@ -856,7 +870,8 @@ def fit_s2(result: dict,
         profile = weibull_log_s2
 
     fit_mask, lags_flat, log_s2_obs = _make_fit_data(
-        result, inner_uv_pixels, min_same_epoch_lag_pix, s2_floor)
+        result, inner_uv_pixels, min_same_epoch_lag_pix, s2_floor,
+        min_n_fraction)
 
     inner_s2  = result['s2'][:, result['lag_dv'].size//2 - inner_uv_pixels
                                 :result['lag_dv'].size//2 + inner_uv_pixels,
@@ -881,20 +896,75 @@ def fit_s2(result: dict,
 
     sqrt_w = np.sqrt(_point_weights(lags_flat, result, weighting))
 
-    def _residuals(params):
-        return sqrt_w * (log_s2_obs - log_s2_model(params, lags_flat,
+    # Optimise with log(s11), log(s22), log(s33) to enforce positivity and
+    # prevent collapse to the degenerate s→0 minimum.  Profile params with
+    # positive bounds are also log-transformed.
+    _N_LOG = 3   # first 3 geom params (s11, s22, s33)
+    prof_bounds = getattr(profile, 'param_bounds',
+                          [(-np.inf, np.inf)] * profile.n_params)
+    _prof_log = [b[0] > 0 for b in prof_bounds]   # which prof params to log
+
+    def _to_opt(p):
+        q = p.copy()
+        q[:_N_LOG] = np.log(np.maximum(p[:_N_LOG], 1e-30))
+        for i, do_log in enumerate(_prof_log):
+            if do_log:
+                q[_N_GEOM + i] = np.log(max(p[_N_GEOM + i], 1e-30))
+        return q
+
+    def _from_opt(q):
+        p = q.copy()
+        p[:_N_LOG] = np.exp(q[:_N_LOG])
+        for i, do_log in enumerate(_prof_log):
+            if do_log:
+                p[_N_GEOM + i] = np.exp(q[_N_GEOM + i])
+        return p
+
+    q0 = _to_opt(p0)
+
+    def _residuals(q):
+        return sqrt_w * (log_s2_obs - log_s2_model(_from_opt(q), lags_flat,
                                                     profile=profile)) / noise_scale_dex
 
-    fit = least_squares(_residuals, p0, loss='soft_l1', f_scale=1.0,
+    # Stage 1: pre-fit profile params with geometry fixed so the profile is
+    # already reasonable before geometry is allowed to move.
+    geom_q0 = q0[:_N_GEOM]
+    prof_q0  = q0[_N_GEOM:]
+
+    def _residuals_profile(prof_q):
+        return _residuals(np.concatenate([geom_q0, prof_q]))
+
+    pre = least_squares(_residuals_profile, prof_q0, loss='soft_l1',
+                        f_scale=1.0, max_nfev=200)
+    q0 = np.concatenate([geom_q0, pre.x])
+
+    # Stage 2: full optimisation from the pre-warmed starting point.
+    fit = least_squares(_residuals, q0, loss='soft_l1', f_scale=1.0,
                         max_nfev=max_nfev)
 
-    out = build_fit_result(result, fit.x, profile=profile,
+    fit_params = _from_opt(fit.x)
+
+    # Detect degenerate collapse (Cholesky diagonals → 0): any s < ~3 pixels.
+    # The degenerate minimum has lower chi² but is physically meaningless
+    # (ellipsoid collapses to a point, model = var_inf everywhere).  Fall back
+    # to the stage-1 result: initial geometry with profile pre-fitted.
+    lag_step = float(abs(result['lag_du'][1] - result['lag_du'][0]))
+    collapsed = min(fit_params[:3]) < 3 * lag_step
+    if collapsed:
+        # Degenerate minimum: fall back to stage-1 result (initial geometry +
+        # pre-fitted profile).  The mock fit in build_fit_result will carry the
+        # correct residuals for these params; don't override with fit.fun.
+        fit_params = _from_opt(np.concatenate([geom_q0, pre.x]))
+
+    out = build_fit_result(result, fit_params, profile=profile,
                            inner_uv_pixels=inner_uv_pixels,
                            min_same_epoch_lag_pix=min_same_epoch_lag_pix,
                            s2_floor=s2_floor,
                            noise_scale_dex=noise_scale_dex,
+                           min_n_fraction=min_n_fraction,
                            weighting=weighting)
-    out['fit'] = fit   # replace mock with real optimizer result
+    if not collapsed:
+        out['fit'] = fit   # replace mock with real optimizer result
     return out
 
 
@@ -1321,11 +1391,12 @@ def plot_rgb_epochs(data, fit, ax=None, percentile_clip=(5, 99)):
 # ---------------------------------------------------------------------------
 
 def _process_chunk(args):
-    fn, max_nfev, background, arcsinh_scale, profile, weighting = args
+    fn, max_nfev, background, arcsinh_scale, profile, weighting, min_n_fraction = args
     try:
         data = read_chunk(fn)
         sf   = compute_s2(data, background=background, arcsinh_scale=arcsinh_scale)
-        fit  = fit_s2(sf, profile=profile, max_nfev=max_nfev, weighting=weighting)
+        fit  = fit_s2(sf, profile=profile, max_nfev=max_nfev, weighting=weighting,
+                      min_n_fraction=min_n_fraction)
         return fn, dict(sf=sf, fit=fit)
     except Exception as exc:
         return fn, exc
@@ -1333,7 +1404,7 @@ def _process_chunk(args):
 
 def process_chunks(fns, n_workers=None, max_nfev=None,
                    background=0.03, arcsinh_scale=0.03, profile=None,
-                   weighting='1/r'):
+                   weighting='1/r', min_n_fraction=0.1):
     """
     Run read_chunk -> compute_s2 -> fit_s2 on each file in parallel.
 
@@ -1347,7 +1418,7 @@ def process_chunks(fns, n_workers=None, max_nfev=None,
     except ImportError:
         wrap = lambda it, **kw: it
 
-    args = [(fn, max_nfev, background, arcsinh_scale, profile, weighting) for fn in fns]
+    args = [(fn, max_nfev, background, arcsinh_scale, profile, weighting, min_n_fraction) for fn in fns]
     with multiprocessing.Pool(n_workers) as pool:
         items = list(wrap(
             pool.imap_unordered(_process_chunk, args),
