@@ -789,7 +789,7 @@ def build_fit_result(sf, params, profile=None,
                      s2_floor: float = 10**-3.75,
                      noise_scale_dex: float = 0.1,
                      min_n_fraction: float = 0.1,
-                     fit_stride: int = 2,
+                     fit_stride: int = 1,
                      weighting='1/r') -> dict:
     """
     Build the same dict as fit_s2 returns, but from a given params array or
@@ -1421,7 +1421,7 @@ def _process_chunk(args):
 
 def process_chunks(fns, n_workers=None, max_nfev=None,
                    background=0.03, arcsinh_scale=0.03, profile=None,
-                   weighting='1/r', min_n_fraction=0.1, fit_stride=2):
+                   weighting='1/r', min_n_fraction=0.1, fit_stride=1):
     """
     Run read_chunk -> compute_s2 -> fit_s2 on each file in parallel.
 
