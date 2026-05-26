@@ -374,11 +374,12 @@ _N_GEOM    = 6
 def _compute_r(geom_params, lags):
     """Ellipsoidal radius r = |L⁻¹ lag| for each row of lags (N, 3)."""
     s11, s22, s33, l12, l13, l23 = geom_params
-    L = np.array([[s11, l12, l13],
-                  [0.0, s22, l23],
-                  [0.0, 0.0, s33]])
-    x = scipy.linalg.solve_triangular(L, np.asarray(lags).T)   # (3, N)
-    return np.maximum(np.sqrt((x * x).sum(axis=0)), 1e-100)
+    # Manual back-substitution for the fixed 3×3 upper-triangular L avoids
+    # scipy overhead (validation, dispatch, allocation) on every residual call.
+    xw = lags[:, 2] / s33
+    xv = (lags[:, 1] - l23 * xw) / s22
+    xu = (lags[:, 0] - l12 * xv - l13 * xw) / s11
+    return np.maximum(np.sqrt(xu*xu + xv*xv + xw*xw), 1e-100)
 
 
 def log_s2_model(params, lags, profile=None):
@@ -706,12 +707,15 @@ def principal_axes_from_params(params):
 
 
 def _make_fit_data(sf, inner_uv_pixels, min_same_epoch_lag_pix, s2_floor,
-                   min_n_fraction=0.1):
+                   min_n_fraction=0.1, fit_stride=1):
     """Select lag points for fitting; shared by fit_s2 and build_fit_result.
 
     min_n_fraction : exclude lags where N < min_n_fraction * max(N) for that
         pair.  Removes severely under-sampled lags caused by masked image
         regions without requiring a hand-tuned absolute threshold.
+    fit_stride     : take every fit_stride-th lag pixel in U and V.  Values
+        > 1 reduce N by ~fit_stride² and speed up fitting proportionally with
+        negligible effect on fit quality (S2 is smooth).
     """
     s2_arr      = sf['s2']
     n_counts    = sf['n_counts']
@@ -734,6 +738,13 @@ def _make_fit_data(sf, inner_uv_pixels, min_same_epoch_lag_pix, s2_floor,
     near_zero = ((ROW_OFF <= min_same_epoch_lag_pix) &
                  (COL_OFF <= min_same_epoch_lag_pix))
 
+    # Stride mask: every fit_stride-th pixel in both directions
+    if fit_stride > 1:
+        stride_mask = np.zeros((2 * p, 2 * p), dtype=bool)
+        stride_mask[::fit_stride, ::fit_stride] = True
+    else:
+        stride_mask = None
+
     dU_list, dV_list, dW_list, log_s2_list = [], [], [], []
     fit_mask = np.zeros((n_pairs, n_lag_v, n_lag_u), dtype=bool)
 
@@ -744,6 +755,8 @@ def _make_fit_data(sf, inner_uv_pixels, min_same_epoch_lag_pix, s2_floor,
         mask  = np.isfinite(plane) & (n_win >= min_n_fraction * n_max)
         if i == j:
             mask &= ~near_zero
+        if stride_mask is not None:
+            mask &= stride_mask
         fit_mask[k, v_sl, u_sl] = mask
         log_s2 = np.log10(np.maximum(plane, s2_floor))
         sel = mask.ravel()
@@ -776,6 +789,7 @@ def build_fit_result(sf, params, profile=None,
                      s2_floor: float = 10**-3.75,
                      noise_scale_dex: float = 0.1,
                      min_n_fraction: float = 0.1,
+                     fit_stride: int = 2,
                      weighting='1/r') -> dict:
     """
     Build the same dict as fit_s2 returns, but from a given params array or
@@ -806,7 +820,8 @@ def build_fit_result(sf, params, profile=None,
                    **dict(zip(profile.param_names, params_arr[_N_GEOM:]))}
 
     fit_mask, lags_flat, log_s2_obs = _make_fit_data(
-        sf, inner_uv_pixels, min_same_epoch_lag_pix, s2_floor, min_n_fraction)
+        sf, inner_uv_pixels, min_same_epoch_lag_pix, s2_floor, min_n_fraction,
+        fit_stride)
 
     weights_flat = _point_weights(lags_flat, sf, weighting)
     residuals    = (np.sqrt(weights_flat) * (log_s2_obs - log_s2_model(params_arr, lags_flat, profile=profile))
@@ -844,6 +859,7 @@ def fit_s2(result: dict,
            s2_floor: float = 10**-3.75,
            noise_scale_dex: float = 0.1,
            min_n_fraction: float = 0.1,
+           fit_stride: int = 2,
            max_nfev: int | None = None,
            weighting='1/r') -> dict:
     """
@@ -871,7 +887,7 @@ def fit_s2(result: dict,
 
     fit_mask, lags_flat, log_s2_obs = _make_fit_data(
         result, inner_uv_pixels, min_same_epoch_lag_pix, s2_floor,
-        min_n_fraction)
+        min_n_fraction, fit_stride)
 
     inner_s2  = result['s2'][:, result['lag_dv'].size//2 - inner_uv_pixels
                                 :result['lag_dv'].size//2 + inner_uv_pixels,
@@ -962,6 +978,7 @@ def fit_s2(result: dict,
                            s2_floor=s2_floor,
                            noise_scale_dex=noise_scale_dex,
                            min_n_fraction=min_n_fraction,
+                           fit_stride=fit_stride,
                            weighting=weighting)
     if not collapsed:
         out['fit'] = fit   # replace mock with real optimizer result
@@ -1391,12 +1408,12 @@ def plot_rgb_epochs(data, fit, ax=None, percentile_clip=(5, 99)):
 # ---------------------------------------------------------------------------
 
 def _process_chunk(args):
-    fn, max_nfev, background, arcsinh_scale, profile, weighting, min_n_fraction = args
+    fn, max_nfev, background, arcsinh_scale, profile, weighting, min_n_fraction, fit_stride = args
     try:
         data = read_chunk(fn)
         sf   = compute_s2(data, background=background, arcsinh_scale=arcsinh_scale)
         fit  = fit_s2(sf, profile=profile, max_nfev=max_nfev, weighting=weighting,
-                      min_n_fraction=min_n_fraction)
+                      min_n_fraction=min_n_fraction, fit_stride=fit_stride)
         return fn, dict(sf=sf, fit=fit)
     except Exception as exc:
         return fn, exc
@@ -1404,7 +1421,7 @@ def _process_chunk(args):
 
 def process_chunks(fns, n_workers=None, max_nfev=None,
                    background=0.03, arcsinh_scale=0.03, profile=None,
-                   weighting='1/r', min_n_fraction=0.1):
+                   weighting='1/r', min_n_fraction=0.1, fit_stride=2):
     """
     Run read_chunk -> compute_s2 -> fit_s2 on each file in parallel.
 
@@ -1418,7 +1435,7 @@ def process_chunks(fns, n_workers=None, max_nfev=None,
     except ImportError:
         wrap = lambda it, **kw: it
 
-    args = [(fn, max_nfev, background, arcsinh_scale, profile, weighting, min_n_fraction) for fn in fns]
+    args = [(fn, max_nfev, background, arcsinh_scale, profile, weighting, min_n_fraction, fit_stride) for fn in fns]
     with multiprocessing.Pool(n_workers) as pool:
         items = list(wrap(
             pool.imap_unordered(_process_chunk, args),
