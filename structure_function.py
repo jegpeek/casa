@@ -27,6 +27,7 @@ import h5py
 from numpy.fft import rfft2, irfft2
 from itertools import combinations
 import scipy.linalg
+import scipy.ndimage
 from scipy.optimize import least_squares
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
@@ -38,7 +39,7 @@ import util_efs
 # I/O
 # ---------------------------------------------------------------------------
 
-def read_chunk(filename: str) -> dict:
+def read_chunk(filename: str, edge_mask_radius: int = 20) -> dict:
     """
     Read a uvw_chunk_NNN_products.h5 file.
 
@@ -47,14 +48,30 @@ def read_chunk(filename: str) -> dict:
       U_grid      : (n_rows, n_cols) float64            — U coords [ly]
       V_grid      : (n_rows, n_cols) float64            — V coords [ly]
       W_values    : (n_epochs,) float64                 — W coord per epoch [ly]
+
+    Pixels within edge_mask_radius of any NaN/zero pixel are set to NaN.
+    Bad pixels are always contiguous with the image boundary (verified across
+    all chunks), so this safely erodes image edges without masking interiors.
     """
     with h5py.File(filename, "r") as f:
-        return {
-            "flux_epochs": f["raw_data/flux_epochs"][:],
-            "U_grid":      f["raw_data/U_grid"][:],
-            "V_grid":      f["raw_data/V_grid"][:],
-            "W_values":    f["raw_data/W_values"][:],
-        }
+        flux = f["raw_data/flux_epochs"][:]
+        U_grid   = f["raw_data/U_grid"][:]
+        V_grid   = f["raw_data/V_grid"][:]
+        W_values = f["raw_data/W_values"][:]
+
+    if edge_mask_radius > 0:
+        for ep in range(flux.shape[0]):
+            bad = ~np.isfinite(flux[ep]) | (flux[ep] == 0)
+            if bad.any():
+                dist = scipy.ndimage.distance_transform_edt(~bad)
+                flux[ep][dist <= edge_mask_radius] = np.nan
+
+    return {
+        "flux_epochs": flux,
+        "U_grid":      U_grid,
+        "V_grid":      V_grid,
+        "W_values":    W_values,
+    }
 
 
 # ---------------------------------------------------------------------------
