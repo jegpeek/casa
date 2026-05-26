@@ -267,8 +267,8 @@ def compute_s2(data: dict,
         MF2_fft = [rfft2(masks[e] * f_[e]**2, s=fft_shape) for e in range(n_epochs)]
 
     out_shape = (n_pairs, 2 * n_rows - 1, 2 * n_cols - 1)
-    s2       = np.full(out_shape, np.nan)
-    n_counts = np.zeros(out_shape, dtype=np.float64)
+    s2       = np.full(out_shape, np.nan, dtype=np.float32)
+    n_counts = np.zeros(out_shape, dtype=np.int32)
 
     for k, (i, j) in enumerate(epoch_pairs):
         dsq, N = _sum_diff_sq_full(
@@ -449,7 +449,7 @@ def predict_s2(params, lag_du, lag_dv, lag_dw, profile=None):
     dv_flat = DV.ravel()
     n_lag_v, n_lag_u = DV.shape
     n_pairs = len(lag_dw)
-    s2_pred = np.empty((n_pairs, n_lag_v, n_lag_u))
+    s2_pred = np.empty((n_pairs, n_lag_v, n_lag_u), dtype=np.float32)
     for k, dw in enumerate(lag_dw):
         lags = np.column_stack([du_flat, dv_flat, np.full(du_flat.size, dw)])
         s2_pred[k] = (10 ** log_s2_model(params, lags, profile=profile)
@@ -854,7 +854,7 @@ def build_fit_result(sf, params, profile=None,
         w_2d = 1.0 / np.maximum(np.hypot(DU_full, DV_full), lag_step)
     else:
         w_2d = np.ones_like(DU_full)
-    fit_weight = fit_mask * w_2d   # (n_pairs, n_lag_v, n_lag_u)
+    fit_weight = (fit_mask * w_2d).astype(np.float32)
 
     return {
         'fit':        mock_fit,
