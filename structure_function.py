@@ -881,7 +881,8 @@ def fit_s2(result: dict,
            min_n_fraction: float = 0.1,
            fit_stride: int = 2,
            max_nfev: int | None = None,
-           weighting='1/r') -> dict:
+           weighting='1/r',
+           allow_collapse: bool = False) -> dict:
     """
     Fit S2(dU, dV, dW) to the structure function using a pluggable 1D profile.
 
@@ -986,7 +987,7 @@ def fit_s2(result: dict,
     # to the stage-1 result: initial geometry with profile pre-fitted.
     lag_step = float(abs(result['lag_du'][1] - result['lag_du'][0]))
     collapsed = min(fit_params[:3]) < 3 * lag_step
-    if collapsed:
+    if collapsed and not allow_collapse:
         # Degenerate minimum: fall back to stage-1 result (initial geometry +
         # pre-fitted profile).  The mock fit in build_fit_result will carry the
         # correct residuals for these params; don't override with fit.fun.
@@ -1000,8 +1001,8 @@ def fit_s2(result: dict,
                            min_n_fraction=min_n_fraction,
                            fit_stride=fit_stride,
                            weighting=weighting)
-    out['collapsed'] = collapsed
-    if not collapsed:
+    out['collapsed'] = collapsed and not allow_collapse
+    if not collapsed or allow_collapse:
         out['fit'] = fit   # replace mock with real optimizer result
     return out
 
