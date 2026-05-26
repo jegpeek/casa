@@ -39,7 +39,7 @@ import util_efs
 # I/O
 # ---------------------------------------------------------------------------
 
-def read_chunk(filename: str, edge_mask_radius: int = 20) -> dict:
+def read_chunk(filename: str, edge_mask_radius: int = 50) -> dict:
     """
     Read a uvw_chunk_NNN_products.h5 file.
 
@@ -49,7 +49,7 @@ def read_chunk(filename: str, edge_mask_radius: int = 20) -> dict:
       V_grid      : (n_rows, n_cols) float64            — V coords [ly]
       W_values    : (n_epochs,) float64                 — W coord per epoch [ly]
 
-    Pixels within edge_mask_radius of any NaN/zero pixel are set to NaN.
+    Pixels within edge_mask_radius pixels of any NaN/zero pixel are set to NaN.
     Bad pixels are always contiguous with the image boundary (verified across
     all chunks), so this safely erodes image edges without masking interiors.
     """
