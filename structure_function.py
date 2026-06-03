@@ -35,12 +35,57 @@ import matplotlib.gridspec as gridspec
 import matplotlib.patches as mpatches
 import util_efs
 
+LY_PER_PC = 3.2616          # light-years per parsec
+ARCSINH_SCALE = 0.03        # default arcsinh / background noise scale [flux units]
+
+# Per-epoch background adjustments relative to epoch 0.
+# Derived from the median flux in the light-echo region across all epochs.
+# EPOCH_BG_OFFSETS = np.array([0.0, -0.03, -0.03, -0.03, 0.05])
+EPOCH_BG_OFFSETS = np.zeros(5)
 
 # ---------------------------------------------------------------------------
 # I/O
 # ---------------------------------------------------------------------------
 
-def read_chunk(filename: str, edge_mask_radius: int = 50) -> dict:
+def chunk_corners(chunk_id, coords='uv', data_dir='data'):
+    """
+    Return the corner coordinates of a chunk in the full image.
+
+    Parameters
+    ----------
+    chunk_id : int or str
+        Chunk number (e.g. 42 or '42').
+    coords : 'uv' or 'pixel'
+        'uv'    — (u_lo, u_hi, v_lo, v_hi) in light-years
+        'pixel' — (row_lo, row_hi, col_lo, col_hi) as integer slice bounds
+                  into resampled_epochs.npy (row_hi and col_hi are exclusive)
+    data_dir : str
+        Directory containing the chunk HDF5 files and U_grid.npy / V_grid.npy.
+    """
+    fn = f'{data_dir}/uvw_chunk_{chunk_id}_products.h5'
+    with h5py.File(fn, 'r') as f:
+        U = f['raw_data/U_grid'][:]
+        V = f['raw_data/V_grid'][:]
+
+    u_lo, u_hi = float(U[0, 0]),  float(U[0, -1])
+    v_lo, v_hi = float(V[0, 0]),  float(V[-1, 0])
+
+    if coords == 'uv':
+        return u_lo, u_hi, v_lo, v_hi
+
+    U_full = np.load(f'{data_dir}/U_grid.npy')
+    V_full = np.load(f'{data_dir}/V_grid.npy')
+    du = float(U_full[0, 1] - U_full[0, 0])
+    dv = float(V_full[1, 0] - V_full[0, 0])
+    col_lo = int(round((u_lo - float(U_full[0, 0])) / du))
+    row_lo = int(round((v_lo - float(V_full[0, 0])) / dv))
+    col_hi = col_lo + U.shape[1]
+    row_hi = row_lo + V.shape[0]
+    return row_lo, row_hi, col_lo, col_hi
+
+
+def read_chunk(filename: str, edge_mask_radius: int = 50,
+               min_coverage: float = 0.25) -> dict:
     """
     Read a uvw_chunk_NNN_products.h5 file.
 
@@ -53,6 +98,9 @@ def read_chunk(filename: str, edge_mask_radius: int = 50) -> dict:
     Pixels within edge_mask_radius pixels of any NaN/zero pixel are set to NaN.
     Bad pixels are always contiguous with the image boundary (verified across
     all chunks), so this safely erodes image edges without masking interiors.
+
+    Epochs with fewer than min_coverage * n_pixels valid pixels after edge
+    masking are blanked entirely (set to NaN).
     """
     with h5py.File(filename, "r") as f:
         flux = f["raw_data/flux_epochs"][:]
@@ -60,12 +108,20 @@ def read_chunk(filename: str, edge_mask_radius: int = 50) -> dict:
         V_grid   = f["raw_data/V_grid"][:]
         W_values = f["raw_data/W_values"][:]
 
+    n_epochs, n_rows, n_cols = flux.shape
+    total = n_rows * n_cols
+
     if edge_mask_radius > 0:
-        for ep in range(flux.shape[0]):
+        for ep in range(n_epochs):
             bad = ~np.isfinite(flux[ep]) | (flux[ep] == 0)
             if bad.any():
                 dist = scipy.ndimage.distance_transform_edt(~bad)
                 flux[ep][dist <= edge_mask_radius] = np.nan
+
+    if min_coverage > 0:
+        for ep in range(n_epochs):
+            if np.sum(np.isfinite(flux[ep])) / total < min_coverage:
+                flux[ep] = np.nan
 
     return {
         "flux_epochs": flux,
@@ -141,9 +197,10 @@ def _sum_diff_sq_full(m_i_fft, mf_i_fft, mf2_i_fft,
 def compute_s2(data: dict,
                clip_percentiles: tuple | None = (0.002, 0.998),
                fill_nans: bool = False,
-               assume_stationary: bool = True,
-               background: float | None = 0.03,
-               arcsinh_scale: float | None = 0.03) -> dict:
+               assume_stationary: bool = False,
+               background: float | np.ndarray | None = 0.03,
+               arcsinh_scale: float | None = 0.03,
+               subtract_mean: str = 'global') -> dict:
     """
     Compute the 3D structure function for one chunk.
 
@@ -157,18 +214,29 @@ def compute_s2(data: dict,
     fill_nans        : if True, fill NaN pixels with the per-epoch nanmean
                        before computing S2 (matches the old get_sf_2d behaviour).
                        Default False (NaN pixels are excluded and N is adjusted).
-    assume_stationary: if True, replace the per-lag ⟨f²⟩ estimate with the
-                       global per-epoch variance, matching the
-                       S2 = 2*(var − AC) formula used in get_sf_2d.
+    assume_stationary: if True, use the stationary formula S2 = 2*Var - 2*Cov(r),
+                       with variance pooled globally across all epochs.
                        Default False.
-    background       : if not None, subtract this constant from all epochs
-                       before any other processing.  Use to remove a common
-                       instrumental background shared across epochs.
+    background       : if not None, subtract from each epoch's flux before any
+                       other processing.  Scalar: treated as the epoch-0 value;
+                       the other epochs are offset by EPOCH_BG_OFFSETS
+                       (currently zeros, so all epochs get the same value).
+                       1-D array of length n_epochs: per-epoch values used
+                       directly (no EPOCH_BG_OFFSETS applied).
     arcsinh_scale    : if not None, apply arcsinh(flux / arcsinh_scale) after
-                       background subtraction and clipping but before per-epoch
-                       mean subtraction.  Sets the transition scale between
-                       linear (noise-dominated) and logarithmic (signal-dominated)
+                       background subtraction and clipping but before mean
+                       subtraction.  Sets the transition scale between linear
+                       (noise-dominated) and logarithmic (signal-dominated)
                        behaviour; typically set to the per-pixel noise level.
+    subtract_mean    : how to subtract the mean from the arcsinh-transformed
+                       field before computing S2.
+                       'global' (default): subtract a single mean pooled across
+                           all epochs and pixels; avoids catastrophic cancellation
+                           in the stationary formula without removing epoch-to-epoch
+                           structure.
+                       'epoch': subtract the per-epoch nanmean; equivalent to
+                           the old subtract_epoch_mean=True behaviour.
+                       'none': no mean subtraction.
 
     Returns
     -------
@@ -192,7 +260,14 @@ def compute_s2(data: dict,
     flux = data["flux_epochs"].copy()   # (n_epochs, n_rows, n_cols)
 
     if background is not None:
-        flux -= background
+        bg = np.asarray(background, dtype=float)
+        if bg.ndim == 0:
+            n = flux.shape[0]
+            bg_per_epoch = float(bg) + EPOCH_BG_OFFSETS[:n]
+        else:
+            bg_per_epoch = bg
+        for e in range(flux.shape[0]):
+            flux[e] -= bg_per_epoch[e]
 
     if clip_percentiles is not None:
         lo_frac, hi_frac = clip_percentiles
@@ -208,8 +283,22 @@ def compute_s2(data: dict,
     if arcsinh_scale is not None:
         flux = np.arcsinh(flux / arcsinh_scale)
 
-    for e in range(flux.shape[0]):
-        flux[e] -= np.nanmean(flux[e])
+    all_valid = np.concatenate([flux[e][np.isfinite(flux[e])] for e in range(flux.shape[0])])
+    if all_valid.size > 0:
+        med = float(np.median(all_valid))
+        flux_mad_std = float(np.median(np.abs(all_valid - med)) * 1.4826)
+    else:
+        flux_mad_std = np.nan
+
+    if subtract_mean == 'global':
+        all_vals = np.concatenate([flux[e][np.isfinite(flux[e])] for e in range(flux.shape[0])])
+        global_mean = float(all_vals.mean()) if all_vals.size > 0 else 0.0
+        flux -= global_mean
+    elif subtract_mean == 'epoch':
+        for e in range(flux.shape[0]):
+            flux[e] -= np.nanmean(flux[e])
+    elif subtract_mean != 'none':
+        raise ValueError(f"subtract_mean must be 'global', 'epoch', or 'none'; got {subtract_mean!r}")
 
     if fill_nans:
         for e in range(flux.shape[0]):
@@ -256,10 +345,13 @@ def compute_s2(data: dict,
     M_fft = [rfft2(masks[e], s=fft_shape) for e in range(n_epochs)]
 
     if assume_stationary:
-        # Implement S2 = 2*(var - AC); images are already mean-subtracted above
-        # so var = mean(f²) and AC(0) = var, ensuring S2(0) = 0.
+        # S2 = 2*(E[f²] - xcorr(fM,fM)/N).
+        # 'global': pool all epochs for one E[f²]; with subtract_mean='global'
+        #   the field is near-zero-mean so E[f²] ≈ Var(f), avoiding catastrophic
+        #   cancellation from large μ².
+        # 'epoch'/'none': per-epoch E[f²] (preserves old per-epoch behaviour).
         valid = [masks[e].astype(bool) for e in range(n_epochs)]
-        evars = [float(f_[e][valid[e]].var()) if valid[e].any() else 0.0
+        evars = [float((f_[e][valid[e]]**2).mean()) if valid[e].any() else 0.0
                  for e in range(n_epochs)]
         MF_fft  = [rfft2(masks[e] * f_[e],   s=fft_shape) for e in range(n_epochs)]
         MF2_fft = [evars[e] * M_fft[e]                    for e in range(n_epochs)]
@@ -277,7 +369,7 @@ def compute_s2(data: dict,
             M_fft[j], MF_fft[j], MF2_fft[j],
             fft_shape, n_rows, n_cols,
         )
-        valid = N > 0
+        valid = N >= 0.5
         s2[k][valid]  = dsq[valid] / N[valid]
         n_counts[k]   = N
 
@@ -293,10 +385,11 @@ def compute_s2(data: dict,
         "lag_dv":      lag_dv,
         "lag_dw":      lag_dw,
         "epoch_pairs": epoch_pairs,
-        "u_mean":      float(np.mean(U_grid)),
-        "v_mean":      float(np.mean(V_grid)),
-        "w_mean":      float(np.mean(W)),
-        "w_values":    W.copy(),
+        "u_mean":       float(np.mean(U_grid)),
+        "v_mean":       float(np.mean(V_grid)),
+        "w_mean":       float(np.mean(W)),
+        "w_values":     W.copy(),
+        "flux_mad_std": flux_mad_std,
     }
 
 # old code
@@ -358,7 +451,7 @@ def weibull_log_s2(r, params):
 weibull_log_s2.n_params      = 3
 weibull_log_s2.param_names   = ['alpha', 'beta', 'var_inf']
 weibull_log_s2.default_guess = [0.4, 2.0, None]   # None → data-driven
-weibull_log_s2.param_bounds  = [(1e-3, np.inf), (1.0, np.inf), (1e-6, 3.0)]
+weibull_log_s2.param_bounds  = [(1e-3, np.inf), (1.0, 10.0), (1e-6, 4.0)]
 
 
 def broken_pl_log_s2(r, params):
@@ -811,6 +904,14 @@ def _point_weights(lags_flat, sf, weighting):
     raise ValueError(f"Unknown weighting: {weighting!r}")
 
 
+def extract_params(record, profile=None):
+    """Extract fit-parameter dict from a summarize_chunks() structured array row."""
+    if profile is None:
+        profile = weibull_log_s2
+    keys = list(_GEOM_KEYS) + list(profile.param_names)
+    return {k: float(record[k]) for k in keys}
+
+
 def build_fit_result(sf, params, profile=None,
                      inner_uv_pixels: int = 200,
                      min_same_epoch_lag_pix: int = 4,
@@ -889,15 +990,15 @@ def fit_s2(result: dict,
            s2_floor: float = 10**-3.75,
            noise_scale_dex: float = 0.1,
            min_n_fraction: float = 0.1,
-           fit_stride: int = 2,
+           fit_stride: int = 1,
            max_nfev: int | None = None,
            weighting='1/r') -> dict:
     """
     Fit S2(dU, dV, dW) to the structure function using a pluggable 1D profile.
 
     The full parameter vector is [s11, s22, s33, l12, l13, l23, *profile_params].
-    Fitting is done in log10 space with a pseudo-Huber (soft_l1) loss, with
-    residuals normalised by noise_scale_dex.
+    Fitting is done in log10 space (L2 loss) with residuals normalised by
+    noise_scale_dex.
 
     Parameters
     ----------
@@ -1007,13 +1108,13 @@ def fit_s2(result: dict,
     def _residuals_profile(prof_q):
         return _residuals(np.concatenate([geom_q0, prof_q]))
 
-    pre = least_squares(_residuals_profile, prof_q0, loss='soft_l1',
-                        f_scale=1.0, max_nfev=200,
+    pre = least_squares(_residuals_profile, prof_q0, loss='linear',
+                        max_nfev=200,
                         bounds=(q_lo[_N_GEOM:], q_hi[_N_GEOM:]))
     q0 = np.concatenate([geom_q0, pre.x])
 
     # Stage 2: full optimisation from the pre-warmed starting point.
-    fit = least_squares(_residuals, q0, loss='soft_l1', f_scale=1.0,
+    fit = least_squares(_residuals, q0, loss='linear',
                         max_nfev=max_nfev, bounds=(q_lo, q_hi))
 
     fit_params = _from_opt(fit.x)
@@ -1194,6 +1295,7 @@ def _make_thumbnail_axes(sf, fit, subplot_spec,
             rgba[excl, 0] = _OV_ALPHA + (1-_OV_ALPHA) * rgba[excl, 0]
             rgba[excl, 1] = (1-_OV_ALPHA) * rgba[excl, 1]
             rgba[excl, 2] = (1-_OV_ALPHA) * rgba[excl, 2]
+            rgba[excl, 3] = 1.0
 
             ax.imshow(rgba, extent=extent, origin='lower',
                       aspect='auto', interpolation='nearest')
@@ -1454,15 +1556,167 @@ def plot_rgb_epochs(data, fit, ax=None, percentile_clip=(5, 99)):
 
 
 # ---------------------------------------------------------------------------
+# HDF5 save / load
+# ---------------------------------------------------------------------------
+
+def _sf_fit_filename(input_fn):
+    """Derive the output HDF5 path from an input uvw_chunk_NNN_products.h5 path."""
+    import re
+    return re.sub(r'_products\.h5$', '_sf_fit.h5', input_fn)
+
+
+def save_chunk_result(input_fn, sf, fit, out_fn=None):
+    """
+    Save compute_s2 / fit_s2 outputs to an HDF5 file.
+
+    Parameters
+    ----------
+    input_fn : str
+        Path to the source uvw_chunk_NNN_products.h5 file; used to derive
+        the output path when out_fn is None.
+    sf       : dict returned by compute_s2()
+    fit      : dict returned by fit_s2()
+    out_fn   : str or None
+        Output path; defaults to input_fn with '_products' → '_sf_fit'.
+    """
+    if out_fn is None:
+        out_fn = _sf_fit_filename(input_fn)
+
+    fitres = fit['fit']                   # scipy OptimizeResult
+    w      = fit['fit_weight']
+    resid  = fitres.fun
+    sum_w  = float(np.sum(w[w > 0]))
+    chi2_dof = float(np.dot(resid, resid) / sum_w) if sum_w > 0 else np.nan
+
+    with h5py.File(out_fn, 'w') as f:
+        f.attrs['input_file']   = input_fn
+        f.attrs['profile_name'] = getattr(fit.get('profile'), '__name__', 'unknown')
+        f.attrs['weighting']    = fit.get('weighting', '')
+
+        g = f.create_group('sf')
+        g.create_dataset('s2',          data=sf['s2'],          compression='gzip')
+        g.create_dataset('n_counts',    data=sf['n_counts'],    compression='gzip')
+        g.create_dataset('lag_du',      data=sf['lag_du'])
+        g.create_dataset('lag_dv',      data=sf['lag_dv'])
+        g.create_dataset('lag_dw',      data=sf['lag_dw'])
+        g.create_dataset('epoch_pairs', data=np.array(sf['epoch_pairs'], dtype=np.int32))
+        g.create_dataset('w_values',    data=sf['w_values'])
+        g.attrs['u_mean']       = float(sf['u_mean'])
+        g.attrs['v_mean']       = float(sf['v_mean'])
+        g.attrs['w_mean']       = float(sf['w_mean'])
+        g.attrs['flux_mad_std'] = float(sf['flux_mad_std'])
+
+        g = f.create_group('fit')
+        g.create_dataset('s2_pred',      data=fit['s2_pred'],      compression='gzip')
+        g.create_dataset('fit_weight',   data=fit['fit_weight'],   compression='gzip')
+        g.create_dataset('display_mask', data=fit['display_mask'].astype(np.uint8),
+                         compression='gzip')
+        g.create_dataset('log_s2_obs',   data=fit['log_s2_obs'])
+        g.create_dataset('residuals',    data=resid)
+        g.attrs['nfev']     = int(fitres.nfev)
+        g.attrs['success']  = bool(fitres.success)
+        g.attrs['chi2_dof'] = chi2_dof
+
+        pg = g.create_group('params')
+        for k, v in fit['params'].items():
+            pg.attrs[k] = float(v)
+
+    return out_fn
+
+
+def load_chunk_result(fn):
+    """
+    Load a file written by save_chunk_result().
+
+    Returns (sf, fit) dicts with the same structure as compute_s2() /
+    fit_s2(), minus the scipy OptimizeResult (fit['fit'] is a simple
+    namespace with .nfev, .success, .fun).
+    """
+    import types
+
+    with h5py.File(fn, 'r') as f:
+        sf = {
+            's2':          f['sf/s2'][:],
+            'n_counts':    f['sf/n_counts'][:],
+            'lag_du':      f['sf/lag_du'][:],
+            'lag_dv':      f['sf/lag_dv'][:],
+            'lag_dw':      f['sf/lag_dw'][:],
+            'epoch_pairs': [tuple(row) for row in f['sf/epoch_pairs'][:]],
+            'w_values':     f['sf/w_values'][:],
+            'u_mean':       float(f['sf'].attrs['u_mean']),
+            'v_mean':       float(f['sf'].attrs['v_mean']),
+            'w_mean':       float(f['sf'].attrs['w_mean']),
+            'flux_mad_std': float(f['sf'].attrs.get('flux_mad_std', np.nan)),
+        }
+
+        fg   = f['fit']
+        resid = fg['residuals'][:]
+        mock  = types.SimpleNamespace(
+            fun     = resid,
+            nfev    = int(fg.attrs['nfev']),
+            success = bool(fg.attrs['success']),
+        )
+        params = dict(fg['params'].attrs)
+        fit = {
+            'fit':          mock,
+            'params':       params,
+            'profile':      None,
+            'weighting':    f.attrs.get('weighting', ''),
+            's2_pred':      fg['s2_pred'][:],
+            'fit_weight':   fg['fit_weight'][:],
+            'display_mask': fg['display_mask'][:].astype(bool),
+            'log_s2_obs':   fg['log_s2_obs'][:],
+        }
+
+    return sf, fit
+
+
+# ---------------------------------------------------------------------------
+# PDF output
+# ---------------------------------------------------------------------------
+
+def make_chunk_plots_pdf(res, pdf_path, vmin_sf=0.1, vmax_sf=3.0,
+                         vdiff=0.2, uv_range=0.32, **kwargs):
+    """
+    Render one plot_full_page per chunk and write to a PDF.
+
+    Parameters
+    ----------
+    res      : dict mapping filename -> {'sf': ..., 'fit': ...}
+               as returned by process_chunks().
+    pdf_path : output PDF path.
+    vmin_sf, vmax_sf, vdiff, uv_range : forwarded to plot_full_page.
+    **kwargs : additional keyword arguments forwarded to plot_full_page.
+    """
+    from matplotlib.backends.backend_pdf import PdfPages
+
+    fns = sorted(res, key=lambda f: int(
+        __import__('re').search(r'uvw_chunk_(\d+)', f).group(1)))
+
+    with PdfPages(pdf_path) as pdf:
+        for fn in fns:
+            data = read_chunk(fn)
+            sf   = res[fn]['sf']
+            fit  = res[fn]['fit']
+            plot_full_page(sf, fit, data, chunk_id=fn,
+                           vmin_sf=vmin_sf, vmax_sf=vmax_sf,
+                           vdiff=vdiff, uv_range=uv_range,
+                           newfig=True, **kwargs)
+            pdf.savefig()
+            plt.close()
+
+
+# ---------------------------------------------------------------------------
 # Parallel batch processing
 # ---------------------------------------------------------------------------
 
 def _process_chunk(fn, max_nfev=None, background=0.03, arcsinh_scale=0.03,
                    profile=None, weighting='1/r', min_n_fraction=0.1,
-                   fit_stride=1):
+                   fit_stride=1, assume_stationary=True):
     try:
         data = read_chunk(fn)
-        sf   = compute_s2(data, background=background, arcsinh_scale=arcsinh_scale)
+        sf   = compute_s2(data, background=background, arcsinh_scale=arcsinh_scale,
+                          assume_stationary=assume_stationary)
         fit  = fit_s2(sf, profile=profile, max_nfev=max_nfev, weighting=weighting,
                       min_n_fraction=min_n_fraction, fit_stride=fit_stride)
         return fn, dict(sf=sf, fit=fit)
@@ -1472,7 +1726,8 @@ def _process_chunk(fn, max_nfev=None, background=0.03, arcsinh_scale=0.03,
 
 def process_chunks(fns, n_workers=None, max_nfev=None,
                    background=0.03, arcsinh_scale=0.03, profile=None,
-                   weighting='1/r', min_n_fraction=0.1, fit_stride=1):
+                   weighting='1/r', min_n_fraction=0.1, fit_stride=1,
+                   assume_stationary=True):
     """
     Run read_chunk -> compute_s2 -> fit_s2 on each file in parallel.
 
@@ -1490,7 +1745,7 @@ def process_chunks(fns, n_workers=None, max_nfev=None,
     worker = partial(_process_chunk, max_nfev=max_nfev, background=background,
                      arcsinh_scale=arcsinh_scale, profile=profile,
                      weighting=weighting, min_n_fraction=min_n_fraction,
-                     fit_stride=fit_stride)
+                     fit_stride=fit_stride, assume_stationary=assume_stationary)
     with multiprocessing.Pool(n_workers) as pool:
         items = list(wrap(
             pool.imap_unordered(worker, fns),
@@ -1562,6 +1817,7 @@ def summarize_chunks(res, profile=None):
         ('fit_success',  '?'),
         ('n_epochs',     'i4'),
         ('w_span',       'f8'),
+        ('flux_mad_std', 'f8'),
     ])
 
     rows = []
@@ -1603,6 +1859,7 @@ def summarize_chunks(res, profile=None):
             np.degrees(theta), np.degrees(phi), np.degrees(psi),
             chi2_dof, n_pts, bool(fitres.success),
             n_epochs, w_span,
+            sf.get('flux_mad_std', np.nan),
         ))
 
     out = np.array(rows, dtype=dtype)
