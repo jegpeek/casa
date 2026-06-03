@@ -20,11 +20,12 @@ monotonically increasing from negative to positive.
 
 import sys
 import os
+import glob
 sys.path.insert(0, os.path.expanduser('~/projects/util_efs/python'))
 
 import numpy as np
 import h5py
-from numpy.fft import rfft2, irfft2
+from scipy.fft import rfft2, irfft2, next_fast_len
 from itertools import combinations
 import scipy.linalg
 import scipy.ndimage
@@ -38,10 +39,10 @@ import util_efs
 LY_PER_PC = 3.2616          # light-years per parsec
 ARCSINH_SCALE = 0.03        # default arcsinh / background noise scale [flux units]
 
-# Per-epoch background adjustments relative to epoch 0.
-# Derived from the median flux in the light-echo region across all epochs.
-# EPOCH_BG_OFFSETS = np.array([0.0, -0.03, -0.03, -0.03, 0.05])
-EPOCH_BG_OFFSETS = np.zeros(5)
+# Per-epoch scalar subtracted from resampled_epochs_noclip.npy when creating
+# the uvw_chunk_*_products.h5 files.  Add these back to go from chunk flux to
+# noclip flux; pass as background= to go the other way.
+NOCLIP_BACKGROUNDS = np.array([0.342, 0.314, 0.312, 0.316, 0.393])
 
 # ---------------------------------------------------------------------------
 # I/O
@@ -131,6 +132,59 @@ def read_chunk(filename: str, edge_mask_radius: int = 50,
     }
 
 
+def read_fullmap(data_dir='data', epochs=None, stride=1) -> dict:
+    """
+    Read the full-image noclip data and return a dict matching read_chunk().
+
+    Loads resampled_epochs_noclip.npy, U_grid.npy, V_grid.npy, and W_values
+    from the first available chunk file.  Subtracts NOCLIP_BACKGROUNDS so the
+    flux scale matches the chunk files (background ~ 0 in off-cloud regions).
+
+    Parameters
+    ----------
+    epochs : int, list of int, or None
+        Epoch indices to load.  None (default) loads all 5 epochs.  Pass a
+        single int or a list to reduce memory and limit compute_s2 to only
+        the selected epoch pairs (e.g. epochs=2 for just the middle epoch).
+    stride : int
+        Spatial downsampling factor applied to both axes (default 1 = full
+        resolution).  stride=2 halves each dimension, reducing FFT cost
+        ~16× and making compute_s2 ~15× faster at the cost of discarding
+        sub-pixel lags below stride * pixel_ly.
+
+    Returns
+    -------
+    dict with keys flux_epochs, U_grid, V_grid, W_values  (same as read_chunk)
+    """
+    flux     = np.load(f'{data_dir}/resampled_epochs_noclip.npy').copy()
+    U_grid   = np.load(f'{data_dir}/U_grid.npy')
+    V_grid   = np.load(f'{data_dir}/V_grid.npy')
+
+    chunk_fn = sorted(glob.glob(f'{data_dir}/uvw_chunk_*_products.h5'))
+    chunk_fn = [f for f in chunk_fn if 'sf_angular' not in f]
+    with h5py.File(chunk_fn[0], 'r') as f:
+        W_values = f['raw_data/W_values'][:]
+
+    idx = list(range(flux.shape[0])) if epochs is None else (
+        [epochs] if isinstance(epochs, (int, np.integer)) else list(epochs))
+    flux     = flux[idx]
+    W_values = W_values[idx]
+    for i, e in enumerate(idx):
+        flux[i] -= NOCLIP_BACKGROUNDS[e]
+
+    if stride != 1:
+        flux   = flux[:, ::stride, ::stride]
+        U_grid = U_grid[::stride, ::stride]
+        V_grid = V_grid[::stride, ::stride]
+
+    return {
+        "flux_epochs": flux,
+        "U_grid":      U_grid,
+        "V_grid":      V_grid,
+        "W_values":    W_values,
+    }
+
+
 # ---------------------------------------------------------------------------
 # FFT cross-correlation helpers
 # ---------------------------------------------------------------------------
@@ -197,7 +251,7 @@ def _sum_diff_sq_full(m_i_fft, mf_i_fft, mf2_i_fft,
 def compute_s2(data: dict,
                clip_percentiles: tuple | None = (0.002, 0.998),
                fill_nans: bool = False,
-               assume_stationary: bool = False,
+               assume_stationary: bool = True,
                background: float | np.ndarray | None = 0.03,
                arcsinh_scale: float | None = 0.03,
                subtract_mean: str = 'global') -> dict:
@@ -216,13 +270,10 @@ def compute_s2(data: dict,
                        Default False (NaN pixels are excluded and N is adjusted).
     assume_stationary: if True, use the stationary formula S2 = 2*Var - 2*Cov(r),
                        with variance pooled globally across all epochs.
-                       Default False.
+                       Default True.
     background       : if not None, subtract from each epoch's flux before any
-                       other processing.  Scalar: treated as the epoch-0 value;
-                       the other epochs are offset by EPOCH_BG_OFFSETS
-                       (currently zeros, so all epochs get the same value).
-                       1-D array of length n_epochs: per-epoch values used
-                       directly (no EPOCH_BG_OFFSETS applied).
+                       other processing.  Scalar: same value applied to every
+                       epoch.  1-D array of length n_epochs: per-epoch values.
     arcsinh_scale    : if not None, apply arcsinh(flux / arcsinh_scale) after
                        background subtraction and clipping but before mean
                        subtraction.  Sets the transition scale between linear
@@ -260,14 +311,10 @@ def compute_s2(data: dict,
     flux = data["flux_epochs"].copy()   # (n_epochs, n_rows, n_cols)
 
     if background is not None:
-        bg = np.asarray(background, dtype=float)
-        if bg.ndim == 0:
-            n = flux.shape[0]
-            bg_per_epoch = float(bg) + EPOCH_BG_OFFSETS[:n]
-        else:
-            bg_per_epoch = bg
+        bg = np.broadcast_to(np.asarray(background, dtype=float),
+                             (flux.shape[0],))
         for e in range(flux.shape[0]):
-            flux[e] -= bg_per_epoch[e]
+            flux[e] -= bg[e]
 
     if clip_percentiles is not None:
         lo_frac, hi_frac = clip_percentiles
@@ -334,8 +381,8 @@ def compute_s2(data: dict,
 
     # FFT padding: need >= 2*N - 1 in each dimension to avoid aliasing
     fft_shape = (
-        _next_pow2(2 * n_rows - 1),
-        _next_pow2(2 * n_cols - 1),
+        next_fast_len(2 * n_rows - 1),
+        next_fast_len(2 * n_cols - 1),
     )
 
     # Pre-compute per-epoch FFTs
