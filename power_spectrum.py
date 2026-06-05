@@ -310,6 +310,118 @@ def make_log_sensitivity_pdf(pdf_path, data_dir='data',
     print(f'Saved {pdf_path}')
 
 
+def load_leike_cube(h5_path, field_kind='linear', rho_floor=1e-12):
+    """Load and preprocess the Leike mean_std.h5 extinction cube.
+
+    Parameters
+    ----------
+    h5_path   : path to mean_std.h5
+    field_kind: 'linear' (extinction density rho, e-folds/pc)
+                'log'    (log rho, dimensionless)
+    rho_floor : lower clip before log (field_kind='log' only)
+
+    Returns
+    -------
+    cube : (740, 740, 540) float64 array, mean-subtracted
+    """
+    import h5py
+    with h5py.File(h5_path, 'r') as f:
+        cube = f['mean'][:]
+    s = cube.astype(np.float64)
+    if field_kind == 'log':
+        s = np.log(np.maximum(s, rho_floor))
+    s -= s.mean()
+    return s
+
+
+def power_3d(field, n_bins=30, dx_pc=1.0):
+    """3D shell-averaged power spectrum of a field array.
+
+    Normalization matches Leike+2020: P = |F|^2 / N_voxels.
+    Slope of log P vs log k = -beta directly.
+
+    Parameters
+    ----------
+    field  : 3D float array (any subregion of the Leike cube)
+    n_bins : number of log-spaced k bins
+    dx_pc  : voxel size in pc
+
+    Returns
+    -------
+    k_pc : (n,) wavenumber in cycles/pc;  scale = 1/k_pc  [pc]
+    P    : (n,) shell-averaged |F|^2/N
+    """
+    s = np.asarray(field, dtype=np.float64)
+    F = np.fft.fftn(s)
+    power = (F.real**2 + F.imag**2) / s.size
+    del F
+
+    kx = np.fft.fftfreq(s.shape[0], d=dx_pc)
+    ky = np.fft.fftfreq(s.shape[1], d=dx_pc)
+    kz = np.fft.fftfreq(s.shape[2], d=dx_pc)
+    KX, KY, KZ = np.meshgrid(kx, ky, kz, indexing='ij')
+    kmag = np.sqrt(KX**2 + KY**2 + KZ**2).ravel()
+    power = power.ravel()
+    del KX, KY, KZ
+
+    ok = kmag > 0
+    kmag, power = kmag[ok], power[ok]
+
+    bins = np.logspace(np.log10(kmag.min()), np.log10(kmag.max()), n_bins + 1)
+    which = np.digitize(kmag, bins)
+
+    k_cen, P_k = [], []
+    for b in range(1, len(bins)):
+        m = which == b
+        if m.any():
+            k_cen.append(kmag[m].mean())
+            P_k.append(power[m].mean())
+    return np.array(k_cen), np.array(P_k)
+
+
+def read_leike_slice(h5_path, z_slice=None, stride=1):
+    """Read a 2D midplane slice from Leike mean_std.h5.
+
+    The map is (740, 740, 540) at 1 pc/voxel: axes are (x→GC, y→lon, z⊥disk).
+    Returns a data dict compatible with compute_s2 / azimuthal_average_sf,
+    with coordinates in light-years (so R_pc from azimuthal_average_sf is correct).
+
+    z_slice : z-axis index (default: midplane = nz//2, i.e. z=0 at the Sun)
+    stride  : spatial downsampling factor (applied to x and y axes)
+    """
+    import h5py
+    with h5py.File(h5_path, 'r') as f:
+        mean = f['mean'][::stride, ::stride, :]   # (nx, ny, nz)
+    if z_slice is None:
+        z_slice = mean.shape[2] // 2
+    slab = mean[:, :, z_slice].T.astype(np.float64)   # (ny, nx)
+    ny, nx = slab.shape
+    pixel_ly = stride * LY_PER_PC
+    x_ly = (np.arange(nx) - nx // 2) * pixel_ly
+    y_ly = (np.arange(ny) - ny // 2) * pixel_ly
+    U_grid, V_grid = np.meshgrid(x_ly, y_ly)          # 'xy': (ny, nx)
+    return {
+        'flux_epochs': slab[np.newaxis],               # (1, ny, nx)
+        'U_grid':      U_grid,
+        'V_grid':      V_grid,
+        'W_values':    np.array([0.0]),
+    }
+
+
+def compute_s2_leike(data, rho_floor=1e-4):
+    """Compute S2 of log(rho) from Leike extinction density data.
+
+    rho_floor : floor in e-folds/pc applied before log (default 1e-4,
+                well below cloud density ~1e-2–1e-1 pc^-1 but above numerical
+                zeros in void voxels).
+    """
+    d = dict(data)
+    rho = data['flux_epochs'].copy()
+    d['flux_epochs'] = np.log(np.maximum(rho, rho_floor))
+    return compute_s2(d, arcsinh_scale=None, background=0,
+                      subtract_mean='global', assume_stationary=True)
+
+
 def main():
     print("Loading data...")
     epochs = np.load('data/resampled_epochs.npy')   # (5, ny, nx)
