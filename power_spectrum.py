@@ -408,18 +408,105 @@ def read_leike_slice(h5_path, z_slice=None, stride=1):
     }
 
 
-def compute_s2_leike(data, rho_floor=1e-4):
-    """Compute S2 of log(rho) from Leike extinction density data.
+def leike_s2_avg(cube, n_slices=None, axis=2, dx_pc=1.0, log_floor=1e-4):
+    """Average 2D log-S2 over multiple slices of the Leike extinction cube.
 
-    rho_floor : floor in e-folds/pc applied before log (default 1e-4,
-                well below cloud density ~1e-2–1e-1 pc^-1 but above numerical
-                zeros in void voxels).
+    cube     : raw (nx, ny, nz) extinction density array (e-folds/pc) as
+               loaded from mean_std.h5 — not logged or mean-subtracted
+    n_slices : number of evenly-spaced slices to average (default: all)
+    axis     : 0, 1, or 2 — axis to slice along
+    dx_pc    : voxel size in pc
+    log_floor: lower clip applied before log (default 1e-4)
+
+    Returns averaged S2 dict compatible with azimuthal_average_sf.
     """
-    d = dict(data)
-    rho = data['flux_epochs'].copy()
-    d['flux_epochs'] = np.log(np.maximum(rho, rho_floor))
-    return compute_s2(d, arcsinh_scale=None, background=0,
-                      subtract_mean='global', assume_stationary=True)
+    n_total = cube.shape[axis]
+    indices = (np.linspace(0, n_total - 1, n_slices).astype(int)
+               if n_slices is not None else np.arange(n_total))
+
+    s2_num = None
+    nc_den = None
+    sf_ref = None
+
+    for idx in indices:
+        slc = [slice(None), slice(None), slice(None)]
+        slc[axis] = int(idx)
+        slab = np.asarray(cube[tuple(slc)], dtype=np.float64)  # 2D
+        # ensure (n_rows, n_cols) orientation; axis=0 gives (ny,nz), others (nx,n*)
+        if axis != 0:
+            slab = slab.T
+
+        ny, nx = slab.shape
+        pix_ly = dx_pc * LY_PER_PC
+        x_ly = (np.arange(nx) - nx // 2) * pix_ly
+        y_ly = (np.arange(ny) - ny // 2) * pix_ly
+        U_grid, V_grid = np.meshgrid(x_ly, y_ly)
+        d = {
+            'flux_epochs': np.log(np.maximum(slab[np.newaxis], log_floor)),
+            'U_grid':      U_grid,
+            'V_grid':      V_grid,
+            'W_values':    np.array([0.0]),
+        }
+
+        sf = compute_s2(d, arcsinh_scale=None, background=0,
+                        subtract_mean='global', assume_stationary=True)
+
+        valid = np.isfinite(sf['s2'])
+        w    = np.where(valid, sf['n_counts'].astype(float), 0.0)
+        s2_w = np.where(valid, sf['n_counts'].astype(float) * sf['s2'], 0.0)
+
+        if s2_num is None:
+            s2_num, nc_den, sf_ref = s2_w, w, sf
+        else:
+            s2_num += s2_w
+            nc_den += w
+
+    result = dict(sf_ref)
+    result['s2']       = np.where(nc_den > 0, s2_num / nc_den, np.nan).astype(np.float32)
+    result['n_counts'] = nc_den.astype(np.int32)
+    return result
+
+
+def plot_echo_leike_s2(fullsky=None, cube=None,
+                       leike_h5='leike2020/mean_std.h5',
+                       clip_snr=3, n_slices=1, leike_axis=2,
+                       log_floor=1e-4, ax=None):
+    """Compare log-S2(r) of light echo vs Leike+2020.
+
+    fullsky  : data dict from read_fullmap(); loaded if None
+    cube     : raw Leike extinction cube (nx,ny,nz) from mean_std.h5;
+               loaded from leike_h5 if None.  Must NOT be mean-subtracted
+               (i.e. do not pass the output of load_leike_cube here).
+    n_slices : Leike slices to average (1 = midplane only)
+    """
+    import h5py
+
+    if fullsky is None:
+        fullsky = read_fullmap()
+
+    if cube is None:
+        with h5py.File(leike_h5, 'r') as f:
+            cube = f['mean'][:]
+
+    sf_echo = compute_s2_log(fullsky, clip_snr=clip_snr)
+    r_echo, s2_echo, _ = azimuthal_average_sf(sf_echo)
+
+    mid = cube.shape[leike_axis] // 2
+    slc = [slice(None)] * 3
+    slc[leike_axis] = slice(mid, mid + 1)
+    leike_cube = cube[tuple(slc)] if n_slices == 1 else cube
+    sf_leike = leike_s2_avg(leike_cube, n_slices=n_slices,
+                            axis=leike_axis, log_floor=log_floor)
+    r_leike, s2_leike, _ = azimuthal_average_sf(sf_leike)
+
+    if ax is None:
+        _, ax = plt.subplots()
+    ax.loglog(r_echo  * LY_PER_PC, s2_echo,  label='echo')
+    ax.loglog(r_leike * LY_PER_PC, s2_leike, label='Leike midplane')
+    ax.set_xlabel('r  [ly]')
+    ax.set_ylabel('S₂  [log-flux²]')
+    ax.legend()
+    return ax
 
 
 def main():
