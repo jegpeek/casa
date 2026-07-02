@@ -591,6 +591,24 @@ ECHO_PARAMS  = ('clip_threshold', 'epoch')
 LEIKE_PARAMS = ('log_floor', 'footprint')
 
 
+def _two_column_legend(ax, left, right, **kw):
+    """Two-column legend with `left` handles in the left column and `right` in
+    the right.  matplotlib fills columns as contiguous chunks, so we pad the
+    shorter group with blank rows to keep the two groups in separate columns.
+    """
+    from matplotlib.lines import Line2D
+    n = max(len(left), len(right), 1)
+
+    def pad(g):
+        return list(g) + [Line2D([], [], linestyle='none')
+                          for _ in range(n - len(g))]
+
+    handles = pad(left) + pad(right)
+    labels = [' ' if h.get_label().startswith('_') else h.get_label()
+              for h in handles]
+    ax.legend(handles=handles, labels=labels, ncol=2, **kw)
+
+
 def plot_echo_leike_sensitivity(ax=None, stride=2,
                                 leike_h5='leike2020/mean_std.h5',
                                 clip_threshold=0.09, epoch=0, norm=1.0,
@@ -621,20 +639,21 @@ def plot_echo_leike_sensitivity(ax=None, stride=2,
     nominal = dict(clip_threshold=clip_threshold, epoch=epoch,
                    log_floor=log_floor, footprint=footprint)
     faint = dict(lw=1, alpha=0.7)
+    echo_handles, leike_handles = [], []
 
-    def _draw(r_pc, s2, **kw):
+    def _draw(r_pc, s2, group, **kw):
         if domain == 'ps':
             x, y = s2_to_ps(r_pc, s2)
         else:
             x, y = r_pc * LY_PER_PC, s2
-        ax.loglog(x, y, **kw)
+        group.append(ax.loglog(x, y, **kw)[0])
 
     # ---- echo cloud ----  (nominal C0, variations cycle C1, C2, ...)
     fullsky = read_fullmap(stride=stride)
     sf_nom = compute_s2_echo(fullsky, clip_threshold=clip_threshold,  # nom + epoch
                              transform=transform, norm=norm)
     r, s2, _ = azimuthal_average_sf(sf_nom, pair=epoch)
-    _draw(r, s2, color='C0', lw=2.5, label='echo (nominal)')
+    _draw(r, s2, echo_handles, color='C0', lw=2.5, label='echo (nominal)')
     ci = 1
     for param in ECHO_PARAMS:
         for v in DEFAULT_SWEEPS[param]:
@@ -645,7 +664,8 @@ def plot_echo_leike_sensitivity(ax=None, stride=2,
             else:                                           # clip_threshold
                 r, s2 = echo_s2_curve(fullsky=fullsky, clip_threshold=v,
                                       epoch=epoch, transform=transform, norm=norm)
-            _draw(r, s2, color=f'C{ci}', label=f'{param}={v}', **faint)
+            _draw(r, s2, echo_handles, color=f'C{ci}', label=f'{param}={v}',
+                  **faint)
             ci += 1
 
     # ---- Leike cloud ----  (nominal C0, variations cycle C1, C2, ...)
@@ -658,14 +678,15 @@ def plot_echo_leike_sensitivity(ax=None, stride=2,
         return leike_s2_curve(cube=cube, **opts)
 
     r, s2 = _leike()
-    _draw(r, s2, color='C0', lw=2.5, label='Leike (nominal)')
+    _draw(r, s2, leike_handles, color='C0', lw=2.5, label='Leike (nominal)')
     ci = 1
     for param in LEIKE_PARAMS:
         for v in DEFAULT_SWEEPS[param]:
             if v == nominal[param]:
                 continue
             r, s2 = _leike(**{param: v})
-            _draw(r, s2, color=f'C{ci}', label=f'{param}={v}', **faint)
+            _draw(r, s2, leike_handles, color=f'C{ci}', label=f'{param}={v}',
+                  **faint)
             ci += 1
 
     if domain == 'ps':
@@ -675,7 +696,10 @@ def plot_echo_leike_sensitivity(ax=None, stride=2,
         ax.set_xlabel('r  [ly]')
         ax.set_ylabel(_s2_ylabel(transform))
     ax.set_title(f'Echo vs Leike — sensitivity ({transform}, {domain}, stride={stride})')
-    ax.legend(fontsize=7, ncol=2)
+    # PS inverts the x-axis (Leike at low k on the left), so put Leike first.
+    left, right = ((leike_handles, echo_handles) if domain == 'ps'
+                   else (echo_handles, leike_handles))
+    _two_column_legend(ax, left, right, fontsize=7)
     ax.grid(True, which='both', alpha=0.2)
     return ax
 
