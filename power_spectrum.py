@@ -30,6 +30,9 @@ from structure_function import LY_PER_PC, compute_s2, read_fullmap
 MAG_PER_EFOLD = 2.5 / np.log(10)   # e-folds (natural-log tau) -> extinction mag
 A_G_OVER_A_V  = 0.789              # Gaia G / Johnson V extinction ratio (R_V=3.1);
                                    # Wang & Chen 2019, ApJ 877, 116
+N_H_PER_AV    = 1.9e21             # N(H)/A_V [cm^-2 mag^-1]; Bohlin, Savage &
+                                   # Drake 1978 (N_H/E(B-V)=5.8e21, R_V=3.1)
+PC_CM         = 3.0857e18          # cm per parsec
 
 
 def av_per_pc(extinction_density):
@@ -45,6 +48,18 @@ def av_per_pc(extinction_density):
     modelling to StarHorse/Leike.
     """
     return extinction_density * MAG_PER_EFOLD / A_G_OVER_A_V
+
+
+def nh_per_cm3(extinction_density):
+    """Hydrogen number density n(H) [cm^-3] from a Leike G-band extinction
+    density (e-folds/pc).
+
+    Chains av_per_pc with the gas-to-dust column ratio:
+        n(H) = av_per_pc(density) * N_H_PER_AV / PC_CM
+    The A_V[mag/pc] -> n(H)[cm^-3] factor is N_H_PER_AV / PC_CM ≈ 6.2e2
+    (i.e. n(H)=1 cm^-3 corresponds to ~1.6e-3 mag/pc).
+    """
+    return av_per_pc(extinction_density) * N_H_PER_AV / PC_CM
 
 
 def azimuthal_average_sf(sf, pixel_ly=None, n_bins=100, pair=0):
