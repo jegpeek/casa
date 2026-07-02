@@ -651,6 +651,7 @@ def _ps_guide(ax, echo_line, leike_line, slope, band=100.0):
 def plot_echo_leike_sensitivity(ax=None, stride=2,
                                 leike_h5='leike2020/mean_std.h5',
                                 clip_threshold=0.09, epoch=0, norm=1.0,
+                                fill_factor=1.0,
                                 footprint='full', slices=0, leike_axis=2,
                                 log_floor=1e-3, transform='log', domain='sf',
                                 guide=True, guide_slope=None, band=100.0):
@@ -668,6 +669,10 @@ def plot_echo_leike_sensitivity(ax=None, stride=2,
     norm      : echo field normalization applied after clipping.  Meaningful for
                 'linear' (scales echo S2 by norm² — the intensity/A(V) match to
                 Leike); a no-op under 'log'.
+    fill_factor: multiply the echo S2/P by this factor (a vertical shift of the
+                echo cloud relative to Leike, in both domains and transforms).
+                Its physical interpretation is still under discussion; here it is
+                purely a display-time relative normalization knob.
     domain    : 'sf' plots S2(r) vs r [ly]; 'ps' plots the power spectrum P(k)
                 derived from each S2 via s2_to_ps (Wiener-Khinchin), vs k [1/pc].
                 A clean power-law Leike cloud in 'ps' validates the transform (it
@@ -699,7 +704,8 @@ def plot_echo_leike_sensitivity(ax=None, stride=2,
     sf_nom = compute_s2_echo(fullsky, clip_threshold=clip_threshold,  # nom + epoch
                              transform=transform, norm=norm)
     r, s2, _ = azimuthal_average_sf(sf_nom, pair=epoch)
-    _draw(r, s2, echo_handles, color='C0', lw=2.5, label='echo (nominal)')
+    _draw(r, s2 * fill_factor, echo_handles, color='C0', lw=2.5,
+          label='echo (nominal)')
     ci = 1
     for param in ECHO_PARAMS:
         for v in DEFAULT_SWEEPS[param]:
@@ -710,8 +716,8 @@ def plot_echo_leike_sensitivity(ax=None, stride=2,
             else:                                           # clip_threshold
                 r, s2 = echo_s2_curve(fullsky=fullsky, clip_threshold=v,
                                       epoch=epoch, transform=transform, norm=norm)
-            _draw(r, s2, echo_handles, color=f'C{ci}', label=f'{param}={v}',
-                  **faint)
+            _draw(r, s2 * fill_factor, echo_handles, color=f'C{ci}',
+                  label=f'{param}={v}', **faint)
             ci += 1
 
     # ---- Leike cloud ----  (nominal C0, variations cycle C1, C2, ...)
