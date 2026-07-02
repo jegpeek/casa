@@ -611,7 +611,10 @@ def _two_column_legend(ax, left, right, **kw):
 
 # Leike+2020 3D power-spectrum spectral index beta (Fig. 4 linear / Fig. 13 log);
 # the 2D-slice PS slope we compare against is beta - 1.
-LEIKE_PS_SLOPE = {'linear': 1.52, 'log': 1.82}   # = 2.52-1 / 2.82-1
+LEIKE_PS_SLOPE = {
+    'linear': 1.72,   # hand-steepened; Leike 2D-slice value is 1.52 (= 2.52-1)
+    'log':    1.82,   # = 2.82 - 1
+}
 
 
 def _ps_guide(ax, echo_line, leike_line, slope, band=100.0):
@@ -735,15 +738,14 @@ def plot_echo_leike_sensitivity(ax=None, stride=2,
     if domain == 'ps' and guide:
         slope = LEIKE_PS_SLOPE[transform] if guide_slope is None else guide_slope
         _ps_guide(ax, echo_handles[0], leike_handles[0], slope, band=band)
-        # keep the y-axis on the data (not the wide band), capping the dynamic
-        # range so near-zero PS points don't blow up the axis
-        allp = np.concatenate([np.asarray(h.get_ydata(), float)
-                               for h in echo_handles + leike_handles])
-        allp = allp[np.isfinite(allp) & (allp > 0)]
-        if allp.size:
-            hi = allp.max()
-            lo = max(allp.min(), hi * 1e-6)
-            ax.set_ylim(lo / 3, hi * 3)
+        # keep the y-axis on the data (not the wide band); base it on the two
+        # nominal curves so both clouds stay in view and faint/pathological
+        # variations don't set the range
+        nom = np.concatenate([np.asarray(echo_handles[0].get_ydata(), float),
+                              np.asarray(leike_handles[0].get_ydata(), float)])
+        nom = nom[np.isfinite(nom) & (nom > 0)]
+        if nom.size:
+            ax.set_ylim(nom.min() / 3, nom.max() * 3)
 
     if domain == 'ps':
         ax.set_xlabel('k  [1/pc]')
