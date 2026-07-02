@@ -22,6 +22,30 @@ from scipy.special import j0
 from matplotlib.backends.backend_pdf import PdfPages
 from structure_function import LY_PER_PC, compute_s2, read_fullmap
 
+# Unit conversions for the Leike+2020 extinction density.  Leike, Glatzle &
+# Enßlin 2020 (A&A 639, A138) reconstruct the differential dust extinction as a
+# Gaia G-band optical depth ("e-folds") per parsec — see their Fig. 2 caption
+# ("differential extinction in e-folds per parsec") and Fig. 14 ("G-band dust
+# extinction density in e-folds per parsec").
+MAG_PER_EFOLD = 2.5 / np.log(10)   # e-folds (natural-log tau) -> extinction mag
+A_G_OVER_A_V  = 0.789              # Gaia G / Johnson V extinction ratio (R_V=3.1);
+                                   # Wang & Chen 2019, ApJ 877, 116
+
+
+def av_per_pc(extinction_density):
+    """Convert Leike+2020 G-band extinction density to A_V [mag / pc].
+
+    Input is the native Leike cube unit: differential dust extinction as a
+    Gaia G-band optical depth ("e-folds") per parsec.  Two factors take it to
+    Johnson-V magnitudes per pc:
+        A_V = density * MAG_PER_EFOLD / A_G_OVER_A_V
+    i.e. e-folds -> magnitudes (2.5/ln10 ≈ 1.086), then Gaia G -> V
+    (A_G = 0.789 A_V).  A_G/A_V really depends on stellar SED and total A_V
+    because G is broad; we adopt one representative value and leave that
+    modelling to StarHorse/Leike.
+    """
+    return extinction_density * MAG_PER_EFOLD / A_G_OVER_A_V
+
 
 def azimuthal_average_sf(sf, pixel_ly=None, n_bins=100, pair=0):
     """
