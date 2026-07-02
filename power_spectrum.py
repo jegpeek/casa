@@ -609,13 +609,18 @@ def _two_column_legend(ax, left, right, **kw):
     ax.legend(handles=handles, labels=labels, ncol=2, **kw)
 
 
-def _ps_guide(ax, echo_line, leike_line, transform, slope=1.82, band=100.0):
-    """Draw a guide-the-eye power law (+ normalization band) on a PS panel.
+# Leike+2020 3D power-spectrum spectral index beta (Fig. 4 linear / Fig. 13 log);
+# the 2D-slice PS slope we compare against is beta - 1.
+LEIKE_PS_SLOPE = {'linear': 1.52, 'log': 1.82}   # = 2.52-1 / 2.82-1
 
-    transform='linear': a k^-slope line anchored to the Leike nominal curve at
-        the smallest scale plotted (its largest k).
-    transform='log'   : the straight (log-log) line between the Leike nominal
-        point nearest k=10^-1.5 and the echo nominal point nearest k=10^1.5.
+
+def _ps_guide(ax, echo_line, leike_line, slope, band=100.0):
+    """Draw a guide-the-eye power law (P ∝ k^-slope) plus a normalization band
+    on a PS panel.
+
+    The slope is Leike's 2D-slice value (beta-1) for the current transform,
+    anchored to the Leike nominal curve at the smallest scale plotted (its
+    largest k) and extrapolated across the full k range toward the echo.
     band : half-width of the shaded normalization envelope.  A 10x field-
         normalization uncertainty is 100x in the (amplitude²) power spectrum, so
         the default 100 shades guide/100 .. guide*100.
@@ -626,26 +631,15 @@ def _ps_guide(ax, echo_line, leike_line, transform, slope=1.82, band=100.0):
         m = np.isfinite(k) & np.isfinite(p) & (k > 0) & (p > 0)
         return k[m], p[m]
 
-    ke, pe = _valid(echo_line)
+    ke, _ = _valid(echo_line)
     kl, pl = _valid(leike_line)
     if ke.size == 0 or kl.size == 0:
         return
 
-    if transform == 'linear':
-        ia = np.argmax(kl)                       # Leike smallest scale = max k
-        kg = np.logspace(np.log10(min(ke.min(), kl.min())),
-                         np.log10(max(ke.max(), kl.max())), 200)
-        guide = pl[ia] * (kg / kl[ia]) ** (-slope)
-    else:                                        # log: two-point connection
-        def _near(k, p, ktarget):
-            i = np.argmin(np.abs(np.log10(k) - np.log10(ktarget)))
-            return k[i], p[i]
-        k1, p1 = _near(kl, pl, 10 ** -1.5)       # Leike anchor
-        k2, p2 = _near(ke, pe, 10 ** 1.5)        # echo anchor
-        kg = np.logspace(np.log10(min(k1, k2)), np.log10(max(k1, k2)), 200)
-        m = (np.log10(p2) - np.log10(p1)) / (np.log10(k2) - np.log10(k1))
-        guide = p1 * (kg / k1) ** m
-
+    ia = np.argmax(kl)                           # Leike smallest scale = max k
+    kg = np.logspace(np.log10(min(ke.min(), kl.min())),
+                     np.log10(max(ke.max(), kl.max())), 200)
+    guide = pl[ia] * (kg / kl[ia]) ** (-slope)
     ax.fill_between(kg, guide / band, guide * band, color='0.6', alpha=0.15,
                     lw=0, zorder=0)
     ax.loglog(kg, guide, ls='--', color='0.4', lw=1.3, zorder=1)
@@ -656,7 +650,7 @@ def plot_echo_leike_sensitivity(ax=None, stride=2,
                                 clip_threshold=0.09, epoch=0, norm=1.0,
                                 footprint='full', slices=0, leike_axis=2,
                                 log_floor=1e-3, transform='log', domain='sf',
-                                guide=True, guide_slope=1.82, band=100.0):
+                                guide=True, guide_slope=None, band=100.0):
     """Overlay echo vs Leike, each as a spread of sensitivity lines.
 
     Every choice in DEFAULT_SWEEPS is varied one at a time (the others held at
@@ -676,9 +670,9 @@ def plot_echo_leike_sensitivity(ax=None, stride=2,
                 A clean power-law Leike cloud in 'ps' validates the transform (it
                 recovers the 2D-slice slope β-1 ≈ 1.82, not the 3D β ≈ 2.82).
     guide     : draw a guide-the-eye power law + normalization band (PS only;
-                see _ps_guide).  For 'linear' the slope is `guide_slope` anchored
-                to Leike at the smallest scale; for 'log' it is the straight line
-                between Leike (k~10^-1.5) and echo (k~10^1.5).
+                see _ps_guide).  Uses Leike's 2D-slice slope for the current
+                transform (β-1: 1.52 linear / 1.82 log; override via guide_slope),
+                anchored to Leike at the smallest scale.
     band      : half-width of the shaded normalization envelope (PS, default
                 100x = a 10x field-normalization uncertainty squared).
     stride    : in-plane downsampling for both sides (default 2 for speed).
@@ -739,8 +733,8 @@ def plot_echo_leike_sensitivity(ax=None, stride=2,
             ci += 1
 
     if domain == 'ps' and guide:
-        _ps_guide(ax, echo_handles[0], leike_handles[0], transform,
-                  slope=guide_slope, band=band)
+        slope = LEIKE_PS_SLOPE[transform] if guide_slope is None else guide_slope
+        _ps_guide(ax, echo_handles[0], leike_handles[0], slope, band=band)
         # keep the y-axis on the data (not the wide band), capping the dynamic
         # range so near-zero PS points don't blow up the axis
         allp = np.concatenate([np.asarray(h.get_ydata(), float)
