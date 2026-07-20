@@ -20,7 +20,6 @@ monotonically increasing from negative to positive.
 
 import sys
 import os
-import glob
 sys.path.insert(0, os.path.expanduser('~/projects/util_efs/python'))
 
 import numpy as np
@@ -39,10 +38,14 @@ import util_efs
 LY_PER_PC = 3.2616          # light-years per parsec
 ARCSINH_SCALE = 0.03        # default arcsinh / background noise scale [flux units]
 
-# Per-epoch scalar subtracted from resampled_epochs_noclip.npy when creating
-# the uvw_chunk_*_products.h5 files.  Add these back to go from chunk flux to
-# noclip flux; pass as background= to go the other way.
-NOCLIP_BACKGROUNDS = np.array([0.342, 0.314, 0.312, 0.316, 0.393])
+# Per-epoch sky background subtracted from resampled_epochs_noclip.npy when the
+# uvw_chunk_*_products.h5 files were built (a single scalar per epoch — recovered
+# exactly, i.e. noclip_slice - chunk has zero spatial variance).  Subtracting
+# these reproduces the chunk flux from the fullsky noclip map to float round-off;
+# earlier 3-decimal values left a ~5e-4 offset.
+NOCLIP_BACKGROUNDS = np.array([0.34245232539640424, 0.313639571526185,
+                               0.311547736890913, 0.3160668003620078,
+                               0.3930647945949676])
 
 # ---------------------------------------------------------------------------
 # I/O
@@ -85,6 +88,36 @@ def chunk_corners(chunk_id, coords='uv', data_dir='data'):
     return row_lo, row_hi, col_lo, col_hi
 
 
+def _apply_edge_mask(flux, edge_mask_radius=50, min_coverage=0.25):
+    """Erode image edges and blank low-coverage epochs, in place.
+
+    Shared by read_chunk and read_window so both mask identically.  Pixels
+    within edge_mask_radius of any NaN/zero pixel are set to NaN (removing the
+    interpolation-contaminated band near the fullmap boundary, where resampling
+    filled edge pixels with near-duplicate nearest-edge values).  Epochs left
+    with fewer than min_coverage * n_pixels valid pixels are blanked entirely.
+
+    NOTE: applied to whatever array it is handed — for a window that is
+    per-window erosion, so a pixel's fate depends on the window's placement.
+    The intended future behaviour is to erode the full map once and cut windows
+    from the masked map (window-invariant); this helper is the single seam for
+    that change.
+    """
+    n_epochs = flux.shape[0]
+    total = flux.shape[1] * flux.shape[2]
+    if edge_mask_radius > 0:
+        for ep in range(n_epochs):
+            bad = ~np.isfinite(flux[ep]) | (flux[ep] == 0)
+            if bad.any():
+                dist = scipy.ndimage.distance_transform_edt(~bad)
+                flux[ep][dist <= edge_mask_radius] = np.nan
+    if min_coverage > 0:
+        for ep in range(n_epochs):
+            if np.sum(np.isfinite(flux[ep])) / total < min_coverage:
+                flux[ep] = np.nan
+    return flux
+
+
 def read_chunk(filename: str, edge_mask_radius: int = 50,
                min_coverage: float = 0.25) -> dict:
     """
@@ -109,20 +142,7 @@ def read_chunk(filename: str, edge_mask_radius: int = 50,
         V_grid   = f["raw_data/V_grid"][:]
         W_values = f["raw_data/W_values"][:]
 
-    n_epochs, n_rows, n_cols = flux.shape
-    total = n_rows * n_cols
-
-    if edge_mask_radius > 0:
-        for ep in range(n_epochs):
-            bad = ~np.isfinite(flux[ep]) | (flux[ep] == 0)
-            if bad.any():
-                dist = scipy.ndimage.distance_transform_edt(~bad)
-                flux[ep][dist <= edge_mask_radius] = np.nan
-
-    if min_coverage > 0:
-        for ep in range(n_epochs):
-            if np.sum(np.isfinite(flux[ep])) / total < min_coverage:
-                flux[ep] = np.nan
+    _apply_edge_mask(flux, edge_mask_radius, min_coverage)
 
     return {
         "flux_epochs": flux,
@@ -137,8 +157,8 @@ def read_fullmap(data_dir='data', epochs=None, stride=1) -> dict:
     Read the full-image noclip data and return a dict matching read_chunk().
 
     Loads resampled_epochs_noclip.npy, U_grid.npy, V_grid.npy, and W_values
-    from the first available chunk file.  Subtracts NOCLIP_BACKGROUNDS so the
-    flux scale matches the chunk files (background ~ 0 in off-cloud regions).
+    (epoch_mean_w.npy).  Subtracts NOCLIP_BACKGROUNDS so the flux scale matches
+    the chunk files (background ~ 0 in off-cloud regions).
 
     Parameters
     ----------
@@ -156,21 +176,31 @@ def read_fullmap(data_dir='data', epochs=None, stride=1) -> dict:
     -------
     dict with keys flux_epochs, U_grid, V_grid, W_values  (same as read_chunk)
     """
-    flux     = np.load(f'{data_dir}/resampled_epochs_noclip.npy').copy()
-    U_grid   = np.load(f'{data_dir}/U_grid.npy')
-    V_grid   = np.load(f'{data_dir}/V_grid.npy')
+    return _read_noclip_region(data_dir, slice(None), slice(None),
+                               epochs, stride)
 
-    chunk_fn = sorted(glob.glob(f'{data_dir}/uvw_chunk_*_products.h5'))
-    chunk_fn = [f for f in chunk_fn if 'sf_angular' not in f]
-    with h5py.File(chunk_fn[0], 'r') as f:
-        W_values = f['raw_data/W_values'][:]
 
-    idx = list(range(flux.shape[0])) if epochs is None else (
+def _read_noclip_region(data_dir, row_slice, col_slice, epochs, stride):
+    """Cut a region out of the fullsky noclip map and return a read_chunk-style
+    dict, WITHOUT edge masking (callers apply _apply_edge_mask as needed).
+
+    Slices via memory-map so a window materialises only its own pixels.  The
+    per-epoch sky background (NOCLIP_BACKGROUNDS) is subtracted so the flux
+    matches the old chunk files, and W_values come from epoch_mean_w.npy (equal
+    to every chunk's stored W).  Striding is applied last, after any masking a
+    caller does, matching read_chunk (which does not stride).
+    """
+    flux_mm = np.load(f'{data_dir}/resampled_epochs_noclip.npy', mmap_mode='r')
+    idx = list(range(flux_mm.shape[0])) if epochs is None else (
         [epochs] if isinstance(epochs, (int, np.integer)) else list(epochs))
-    flux     = flux[idx]
-    W_values = W_values[idx]
-    for i, e in enumerate(idx):
-        flux[i] -= NOCLIP_BACKGROUNDS[e]
+    flux = np.asarray(flux_mm[:, row_slice, col_slice], dtype=float)[idx]
+    flux -= NOCLIP_BACKGROUNDS[idx][:, None, None]
+
+    U_grid = np.asarray(np.load(f'{data_dir}/U_grid.npy',
+                                mmap_mode='r')[row_slice, col_slice])
+    V_grid = np.asarray(np.load(f'{data_dir}/V_grid.npy',
+                                mmap_mode='r')[row_slice, col_slice])
+    W_values = np.load(f'{data_dir}/epoch_mean_w.npy')[idx]
 
     if stride != 1:
         flux   = flux[:, ::stride, ::stride]
@@ -183,6 +213,32 @@ def read_fullmap(data_dir='data', epochs=None, stride=1) -> dict:
         "V_grid":      V_grid,
         "W_values":    W_values,
     }
+
+
+def read_window(row0, col0, nrows=400, ncols=400, data_dir='data',
+                epochs=None, stride=1, edge_mask_radius=50,
+                min_coverage=0.25) -> dict:
+    """Cut a window out of the fullsky noclip map, as a read_chunk-style dict.
+
+    This is the fullsky + window replacement for the fixed uvw_chunk_*.h5 files:
+    for a 400x400 window at a chunk's (row0, col0) it reproduces that chunk's
+    raw_data content (flux/U/V/W) to floating-point round-off, then applies the
+    same per-window edge erosion + coverage blanking as read_chunk.  Windows may
+    be any size/placement, not just the historical 400-tile grid.
+
+    row0, col0 : top-left pixel of the window in the full 6326x6274 image.
+    nrows, ncols : window size in pixels (default 400x400, the chunk size).
+    See read_chunk for edge_mask_radius / min_coverage and read_fullmap for
+    epochs / stride.
+    """
+    d = _read_noclip_region(data_dir, slice(row0, row0 + nrows),
+                            slice(col0, col0 + ncols), epochs, stride=1)
+    _apply_edge_mask(d['flux_epochs'], edge_mask_radius, min_coverage)
+    if stride != 1:
+        d['flux_epochs'] = d['flux_epochs'][:, ::stride, ::stride]
+        d['U_grid'] = d['U_grid'][::stride, ::stride]
+        d['V_grid'] = d['V_grid'][::stride, ::stride]
+    return d
 
 
 # ---------------------------------------------------------------------------
