@@ -1364,6 +1364,10 @@ def fit_s2(result: dict,
                            min_n_fraction=min_n_fraction,
                            fit_stride=fit_stride,
                            weighting=weighting)
+    # Drop the least_squares Jacobian (~half the per-window memory: m residuals
+    # x n params).  It is never read or saved — params come from build_fit_result
+    # and uncertainties from jackknife, not the Jacobian covariance.
+    fit.jac = None
     out['fit'] = fit
     return out
 
