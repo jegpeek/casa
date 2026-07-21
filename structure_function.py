@@ -20,6 +20,7 @@ monotonically increasing from negative to positive.
 
 import sys
 import os
+import re
 sys.path.insert(0, os.path.expanduser('~/projects/util_efs/python'))
 
 import numpy as np
@@ -51,77 +52,202 @@ NOCLIP_BACKGROUNDS = np.array([0.34245232539640424, 0.313639571526185,
 # I/O
 # ---------------------------------------------------------------------------
 
+# The 115 official chunks are named windows into the full image, defined by
+# data/chunk_windows.csv (chunk_id, row, col, size) rather than by the retired
+# uvw_chunk_*_products.h5 files.  chunk_id -> (row, col, size); a chunk is the
+# size x size pixel block at (row, col).  size is stored per chunk so the tile
+# size is free to change.
+
+def _chunk_id(chunk):
+    """Chunk id as int from an id, a bare id string, or a legacy
+    uvw_chunk_<id>_products.h5 path/name."""
+    if isinstance(chunk, (int, np.integer)):
+        return int(chunk)
+    s = str(chunk)
+    m = re.search(r'chunk_(\d+)', s)
+    return int(m.group(1)) if m else int(s)
+
+
+def _load_chunk_windows(data_dir='data'):
+    """Parse data/chunk_windows.csv into {chunk_id: (row, col, size)}."""
+    tbl = {}
+    with open(f'{data_dir}/chunk_windows.csv') as fh:
+        next(fh)                                    # header
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            cid, row, col, size = (int(x) for x in line.split(','))
+            tbl[cid] = (row, col, size)
+    return tbl
+
+
+def chunk_window(chunk, data_dir='data'):
+    """(row, col, size) of a chunk from data/chunk_windows.csv."""
+    return _load_chunk_windows(data_dir)[_chunk_id(chunk)]
+
+
+def chunk_ids(data_dir='data'):
+    """Sorted list of the official chunk ids (the rows of chunk_windows.csv)."""
+    return sorted(_load_chunk_windows(data_dir))
+
+
+def chunk_path(chunk_id, data_dir='data'):
+    """Canonical name/key for a chunk: data/uvw_chunk_<id>_products.h5.  Kept as
+    a stable string key for results/plots even though no such file is read."""
+    return f'{data_dir}/uvw_chunk_{chunk_id}_products.h5'
+
+
+# --- Windows: (row, col, size) is the primary identity for SF analysis. -----
+# The official 115 chunks are one set of windows (chunk_windows.csv); the batch
+# pipeline also runs arbitrary grids (e.g. overlapping 400px windows on a 200px
+# stride).  Results are keyed / named by geometry, not by chunk index.
+
+def _window_spec(item, data_dir='data'):
+    """Normalise a window spec to (row, col, size).  Accepts a (row, col, size)
+    triple directly, or a chunk id / name / legacy path (looked up in the CSV)."""
+    if isinstance(item, (tuple, list)) and len(item) == 3:
+        return (int(item[0]), int(item[1]), int(item[2]))
+    return chunk_window(item, data_dir)
+
+
+def window_result_path(row, col, size, data_dir='data'):
+    """Geometry-based output path for a window's SF fit (replaces the old
+    uvw_chunk_<id>_sf_fit.h5 naming)."""
+    return f'{data_dir}/sf_fit_r{row}_c{col}_s{size}.h5'
+
+
+def window_chunk_id(row, col, size, data_dir='data'):
+    """Official chunk id whose window equals (row, col, size), or -1 if none —
+    a convenience so one can still refer to a window by its old chunk index."""
+    for cid, rcs in _load_chunk_windows(data_dir).items():
+        if rcs == (row, col, size):
+            return cid
+    return -1
+
+
+def window_coverage(row, col, size, data_dir='data', edge_mask_radius=50):
+    """Fraction of finite pixels across all epochs in a window (the cov_all cut
+    used to select windows).  Equals the mean of the fullmap edge mask over the
+    window, since read_window's finite pixels are exactly the mask-valid ones."""
+    mask = _fullsky_edge_mask(data_dir, edge_mask_radius)
+    return float(np.asarray(mask[:, row:row + size, col:col + size]).mean())
+
+
+def official_windows(data_dir='data'):
+    """(row, col, size) for the 115 official chunks, in chunk-id order."""
+    return [chunk_window(i, data_dir) for i in chunk_ids(data_dir)]
+
+
+def window_grid(size=400, stride=200, coverage_min=0.62, data_dir='data',
+                edge_mask_radius=50):
+    """Windows of `size` px on a `stride` px grid over the full image, keeping
+    those with all-epoch coverage > coverage_min.  Default 400px/200px reproduces
+    the old footprint ~4x over (each region seen by up to four windows); the
+    0.62 cut reproduces the official 115 on the non-overlapping 400px grid."""
+    mask = _fullsky_edge_mask(data_dir, edge_mask_radius)
+    _, H, W = mask.shape
+    specs = []
+    for r in range(0, H - size + 1, stride):
+        for c in range(0, W - size + 1, stride):
+            if np.asarray(mask[:, r:r + size, c:c + size]).mean() > coverage_min:
+                specs.append((r, c, size))
+    return specs
+
+
 def chunk_corners(chunk_id, coords='uv', data_dir='data'):
     """
     Return the corner coordinates of a chunk in the full image.
 
     Parameters
     ----------
-    chunk_id : int or str
-        Chunk number (e.g. 42 or '42').
+    chunk_id : int, str, or legacy uvw_chunk_<id>_products.h5 path.
     coords : 'uv' or 'pixel'
         'uv'    — (u_lo, u_hi, v_lo, v_hi) in light-years
         'pixel' — (row_lo, row_hi, col_lo, col_hi) as integer slice bounds
-                  into resampled_epochs.npy (row_hi and col_hi are exclusive)
+                  into the fullsky arrays (row_hi and col_hi are exclusive)
     data_dir : str
-        Directory containing the chunk HDF5 files and U_grid.npy / V_grid.npy.
+        Directory containing chunk_windows.csv and U_grid.npy / V_grid.npy.
     """
-    fn = f'{data_dir}/uvw_chunk_{chunk_id}_products.h5'
-    with h5py.File(fn, 'r') as f:
-        U = f['raw_data/U_grid'][:]
-        V = f['raw_data/V_grid'][:]
+    row, col, size = chunk_window(chunk_id, data_dir)
+    row_lo, row_hi, col_lo, col_hi = row, row + size, col, col + size
 
-    u_lo, u_hi = float(U[0, 0]),  float(U[0, -1])
-    v_lo, v_hi = float(V[0, 0]),  float(V[-1, 0])
+    if coords == 'pixel':
+        return row_lo, row_hi, col_lo, col_hi
 
-    if coords == 'uv':
-        return u_lo, u_hi, v_lo, v_hi
-
-    U_full = np.load(f'{data_dir}/U_grid.npy')
-    V_full = np.load(f'{data_dir}/V_grid.npy')
-    du = float(U_full[0, 1] - U_full[0, 0])
-    dv = float(V_full[1, 0] - V_full[0, 0])
-    col_lo = int(round((u_lo - float(U_full[0, 0])) / du))
-    row_lo = int(round((v_lo - float(V_full[0, 0])) / dv))
-    col_hi = col_lo + U.shape[1]
-    row_hi = row_lo + V.shape[0]
-    return row_lo, row_hi, col_lo, col_hi
+    U = np.load(f'{data_dir}/U_grid.npy', mmap_mode='r')
+    V = np.load(f'{data_dir}/V_grid.npy', mmap_mode='r')
+    u_lo, u_hi = float(U[row_lo, col_lo]), float(U[row_lo, col_hi - 1])
+    v_lo, v_hi = float(V[row_lo, col_lo]), float(V[row_hi - 1, col_lo])
+    return u_lo, u_hi, v_lo, v_hi
 
 
-def _apply_edge_mask(flux, edge_mask_radius=50, min_coverage=0.25):
-    """Erode image edges and blank low-coverage epochs, in place.
+def _epoch_idx(epochs, n_all):
+    """Normalise an epochs selector (None / int / iterable) to a list of ints."""
+    if epochs is None:
+        return list(range(n_all))
+    if isinstance(epochs, (int, np.integer)):
+        return [int(epochs)]
+    return list(epochs)
 
-    Shared by read_chunk and read_window so both mask identically.  Pixels
-    within edge_mask_radius of any NaN/zero pixel are set to NaN (removing the
-    interpolation-contaminated band near the fullmap boundary, where resampling
-    filled edge pixels with near-duplicate nearest-edge values).  Epochs left
-    with fewer than min_coverage * n_pixels valid pixels are blanked entirely.
 
-    NOTE: applied to whatever array it is handed — for a window that is
-    per-window erosion, so a pixel's fate depends on the window's placement.
-    The intended future behaviour is to erode the full map once and cut windows
-    from the masked map (window-invariant); this helper is the single seam for
-    that change.
+def _fullsky_edge_mask(data_dir='data', edge_mask_radius=50, rebuild=False):
+    """Valid-pixel mask (n_epochs, H, W) bool for the full noclip map: True
+    where a pixel survives edge erosion, False for bad pixels (NaN/zero) and
+    everything within edge_mask_radius of them.
+
+    Computed once on the whole map so the mask is window-invariant — a pixel's
+    fate no longer depends on which window views it (the reason to mask the
+    fullmap rather than each chunk).  The erosion removes the interpolation-
+    contaminated band near the fullmap boundary, where resampling filled edge
+    pixels with near-duplicate nearest-edge values.  Cached to
+    data/edge_mask_r<radius>.npy and mmap-reused; pass rebuild=True after the
+    noclip map or the radius definition changes.
+
+    Per-window low-coverage blanking is NOT here (it is regional by nature — see
+    _blank_low_coverage / read_window).
     """
-    n_epochs = flux.shape[0]
+    cache = f'{data_dir}/edge_mask_r{edge_mask_radius}.npy'
+    if not rebuild and os.path.exists(cache):
+        return np.load(cache, mmap_mode='r')
+
+    flux = np.load(f'{data_dir}/resampled_epochs_noclip.npy', mmap_mode='r')
+    mask = np.empty(flux.shape, dtype=bool)
+    for ep in range(flux.shape[0]):
+        f = np.asarray(flux[ep])
+        bad = ~np.isfinite(f) | (f == 0)
+        if edge_mask_radius > 0 and bad.any():
+            dist = scipy.ndimage.distance_transform_edt(~bad)
+            mask[ep] = dist > edge_mask_radius
+        else:
+            mask[ep] = ~bad if edge_mask_radius > 0 else True
+    np.save(cache, mask)
+    return np.load(cache, mmap_mode='r')
+
+
+def _blank_low_coverage(flux, min_coverage=0.25):
+    """Blank (set NaN) in place any epoch whose valid fraction within this window
+    is below min_coverage.  Regional by nature, so applied per window rather than
+    on the fullmap (unlike edge erosion; see _fullsky_edge_mask)."""
+    if min_coverage <= 0:
+        return flux
     total = flux.shape[1] * flux.shape[2]
-    if edge_mask_radius > 0:
-        for ep in range(n_epochs):
-            bad = ~np.isfinite(flux[ep]) | (flux[ep] == 0)
-            if bad.any():
-                dist = scipy.ndimage.distance_transform_edt(~bad)
-                flux[ep][dist <= edge_mask_radius] = np.nan
-    if min_coverage > 0:
-        for ep in range(n_epochs):
-            if np.sum(np.isfinite(flux[ep])) / total < min_coverage:
-                flux[ep] = np.nan
+    for ep in range(flux.shape[0]):
+        if np.sum(np.isfinite(flux[ep])) / total < min_coverage:
+            flux[ep] = np.nan
     return flux
 
 
-def read_chunk(filename: str, edge_mask_radius: int = 50,
-               min_coverage: float = 0.25) -> dict:
+def read_chunk(chunk, edge_mask_radius: int = 50,
+               min_coverage: float = 0.25, data_dir=None) -> dict:
     """
-    Read a uvw_chunk_NNN_products.h5 file.
+    Read one official chunk as a window into the fullsky noclip map.
+
+    `chunk` is a chunk id (int), a bare id string, or a legacy
+    uvw_chunk_<id>_products.h5 path (the id is parsed from it; the file is not
+    read).  The chunk's (row, col, size) comes from data/chunk_windows.csv and
+    the pixels from resampled_epochs_noclip.npy — see read_window, which this
+    wraps.  data_dir defaults to the chunk path's directory, else 'data'.
 
     Returns a dict with keys:
       flux_epochs : (n_epochs, n_rows, n_cols) float64  — may contain NaNs
@@ -129,27 +255,17 @@ def read_chunk(filename: str, edge_mask_radius: int = 50,
       V_grid      : (n_rows, n_cols) float64            — V coords [ly]
       W_values    : (n_epochs,) float64                 — W coord per epoch [ly]
 
-    Pixels within edge_mask_radius pixels of any NaN/zero pixel are set to NaN.
-    Bad pixels are always contiguous with the image boundary (verified across
-    all chunks), so this safely erodes image edges without masking interiors.
-
-    Epochs with fewer than min_coverage * n_pixels valid pixels after edge
-    masking are blanked entirely (set to NaN).
+    Edge erosion (edge_mask_radius) is applied on the fullmap once and cut to
+    the window; epochs with fewer than min_coverage * n_pixels valid pixels in
+    the window are then blanked entirely.
     """
-    with h5py.File(filename, "r") as f:
-        flux = f["raw_data/flux_epochs"][:]
-        U_grid   = f["raw_data/U_grid"][:]
-        V_grid   = f["raw_data/V_grid"][:]
-        W_values = f["raw_data/W_values"][:]
-
-    _apply_edge_mask(flux, edge_mask_radius, min_coverage)
-
-    return {
-        "flux_epochs": flux,
-        "U_grid":      U_grid,
-        "V_grid":      V_grid,
-        "W_values":    W_values,
-    }
+    if data_dir is None:
+        data_dir = (os.path.dirname(chunk) if isinstance(chunk, str)
+                    and os.path.dirname(chunk) else 'data')
+    row, col, size = chunk_window(chunk, data_dir)
+    return read_window(row, col, size, size, data_dir=data_dir,
+                       edge_mask_radius=edge_mask_radius,
+                       min_coverage=min_coverage)
 
 
 def read_fullmap(data_dir='data', epochs=None, stride=1) -> dict:
@@ -182,7 +298,7 @@ def read_fullmap(data_dir='data', epochs=None, stride=1) -> dict:
 
 def _read_noclip_region(data_dir, row_slice, col_slice, epochs, stride):
     """Cut a region out of the fullsky noclip map and return a read_chunk-style
-    dict, WITHOUT edge masking (callers apply _apply_edge_mask as needed).
+    dict, WITHOUT edge masking (read_window applies it; read_fullmap wants none).
 
     Slices via memory-map so a window materialises only its own pixels.  The
     per-epoch sky background (NOCLIP_BACKGROUNDS) is subtracted so the flux
@@ -191,8 +307,7 @@ def _read_noclip_region(data_dir, row_slice, col_slice, epochs, stride):
     caller does, matching read_chunk (which does not stride).
     """
     flux_mm = np.load(f'{data_dir}/resampled_epochs_noclip.npy', mmap_mode='r')
-    idx = list(range(flux_mm.shape[0])) if epochs is None else (
-        [epochs] if isinstance(epochs, (int, np.integer)) else list(epochs))
+    idx = _epoch_idx(epochs, flux_mm.shape[0])
     flux = np.asarray(flux_mm[:, row_slice, col_slice], dtype=float)[idx]
     flux -= NOCLIP_BACKGROUNDS[idx][:, None, None]
 
@@ -222,22 +337,32 @@ def read_window(row0, col0, nrows=400, ncols=400, data_dir='data',
 
     This is the fullsky + window replacement for the fixed uvw_chunk_*.h5 files:
     for a 400x400 window at a chunk's (row0, col0) it reproduces that chunk's
-    raw_data content (flux/U/V/W) to floating-point round-off, then applies the
-    same per-window edge erosion + coverage blanking as read_chunk.  Windows may
-    be any size/placement, not just the historical 400-tile grid.
+    raw_data flux/U/V/W from the fullsky map to floating-point round-off.  Edge
+    erosion is taken from the window-invariant fullmap mask (_fullsky_edge_mask)
+    rather than eroded per window, then low-coverage epochs are blanked for this
+    window.  Windows may be any size/placement, not just the historical grid.
 
     row0, col0 : top-left pixel of the window in the full 6326x6274 image.
     nrows, ncols : window size in pixels (default 400x400, the chunk size).
     See read_chunk for edge_mask_radius / min_coverage and read_fullmap for
     epochs / stride.
     """
-    d = _read_noclip_region(data_dir, slice(row0, row0 + nrows),
-                            slice(col0, col0 + ncols), epochs, stride=1)
-    _apply_edge_mask(d['flux_epochs'], edge_mask_radius, min_coverage)
+    row_slice, col_slice = slice(row0, row0 + nrows), slice(col0, col0 + ncols)
+    d = _read_noclip_region(data_dir, row_slice, col_slice, epochs, stride=1)
+    flux = d['flux_epochs']
+    if edge_mask_radius > 0:
+        mask = _fullsky_edge_mask(data_dir, edge_mask_radius)
+        idx = _epoch_idx(epochs, mask.shape[0])
+        valid = np.asarray(mask[:, row_slice, col_slice])[idx]
+        flux[~valid] = np.nan
+    _blank_low_coverage(flux, min_coverage)
     if stride != 1:
-        d['flux_epochs'] = d['flux_epochs'][:, ::stride, ::stride]
+        d['flux_epochs'] = flux[:, ::stride, ::stride]
         d['U_grid'] = d['U_grid'][::stride, ::stride]
         d['V_grid'] = d['V_grid'][::stride, ::stride]
+    # window geometry (pixel origin + side) so results can key on it rather than
+    # a chunk index; ncols==nrows in the analysis pipeline (square windows)
+    d['row'], d['col'], d['size'] = row0, col0, nrows
     return d
 
 
@@ -481,6 +606,11 @@ def compute_s2(data: dict,
     lag_du   = np.fft.fftshift(lag_du)
     lag_dv   = np.fft.fftshift(lag_dv)
 
+    size_px = int(data.get('size', -1))
+    du_pix  = (float(np.median(np.abs(np.diff(U_grid[0]))))
+               if U_grid.shape[1] > 1 else np.nan)
+    size_ly = size_px * du_pix if size_px > 0 else np.nan
+
     return {
         "s2":          s2,
         "n_counts":    n_counts,
@@ -493,6 +623,10 @@ def compute_s2(data: dict,
         "w_mean":       float(np.mean(W)),
         "w_values":     W.copy(),
         "flux_mad_std": flux_mad_std,
+        "row":          int(data.get('row', -1)),
+        "col":          int(data.get('col', -1)),
+        "size":         size_px,
+        "size_ly":      size_ly,
     }
 
 # old code
@@ -1662,28 +1796,24 @@ def plot_rgb_epochs(data, fit, ax=None, percentile_clip=(5, 99)):
 # HDF5 save / load
 # ---------------------------------------------------------------------------
 
-def _sf_fit_filename(input_fn):
-    """Derive the output HDF5 path from an input uvw_chunk_NNN_products.h5 path."""
-    import re
-    return re.sub(r'_products\.h5$', '_sf_fit.h5', input_fn)
-
-
-def save_chunk_result(input_fn, sf, fit, out_fn=None):
+def save_chunk_result(sf, fit, out_fn=None, data_dir='data'):
     """
-    Save compute_s2 / fit_s2 outputs to an HDF5 file.
+    Save compute_s2 / fit_s2 outputs to a geometry-named HDF5 file.
 
     Parameters
     ----------
-    input_fn : str
-        Path to the source uvw_chunk_NNN_products.h5 file; used to derive
-        the output path when out_fn is None.
-    sf       : dict returned by compute_s2()
-    fit      : dict returned by fit_s2()
+    sf       : dict returned by compute_s2() (carries the window geometry)
+    fit      : dict returned by fit_s2(); if it has a 'jackknife' entry
+               ({quantity: stderr}) those are written under fit/jackknife.
     out_fn   : str or None
-        Output path; defaults to input_fn with '_products' → '_sf_fit'.
+        Output path; defaults to window_result_path(row, col, size) — i.e.
+        sf_fit_r<row>_c<col>_s<size>.h5.
     """
+    row  = int(sf.get('row', -1))
+    col  = int(sf.get('col', -1))
+    size = int(sf.get('size', -1))
     if out_fn is None:
-        out_fn = _sf_fit_filename(input_fn)
+        out_fn = window_result_path(row, col, size, data_dir)
 
     fitres = fit['fit']                   # scipy OptimizeResult
     w      = fit['fit_weight']
@@ -1692,9 +1822,12 @@ def save_chunk_result(input_fn, sf, fit, out_fn=None):
     chi2_dof = float(np.dot(resid, resid) / sum_w) if sum_w > 0 else np.nan
 
     with h5py.File(out_fn, 'w') as f:
-        f.attrs['input_file']   = input_fn
         f.attrs['profile_name'] = getattr(fit.get('profile'), '__name__', 'unknown')
         f.attrs['weighting']    = fit.get('weighting', '')
+        f.attrs['row']          = row
+        f.attrs['col']          = col
+        f.attrs['size']         = size
+        f.attrs['chunk_id']     = window_chunk_id(row, col, size, data_dir)
 
         g = f.create_group('sf')
         g.create_dataset('s2',          data=sf['s2'],          compression='gzip')
@@ -1707,6 +1840,7 @@ def save_chunk_result(input_fn, sf, fit, out_fn=None):
         g.attrs['u_mean']       = float(sf['u_mean'])
         g.attrs['v_mean']       = float(sf['v_mean'])
         g.attrs['w_mean']       = float(sf['w_mean'])
+        g.attrs['size_ly']      = float(sf.get('size_ly', np.nan))
         g.attrs['flux_mad_std'] = float(sf['flux_mad_std'])
 
         g = f.create_group('fit')
@@ -1723,6 +1857,12 @@ def save_chunk_result(input_fn, sf, fit, out_fn=None):
         pg = g.create_group('params')
         for k, v in fit['params'].items():
             pg.attrs[k] = float(v)
+
+        jk = fit.get('jackknife')
+        if jk:
+            jg = g.create_group('jackknife')     # {quantity: stderr}
+            for k, v in jk.items():
+                jg.attrs[k] = float(v)
 
     return out_fn
 
@@ -1749,7 +1889,11 @@ def load_chunk_result(fn):
             'u_mean':       float(f['sf'].attrs['u_mean']),
             'v_mean':       float(f['sf'].attrs['v_mean']),
             'w_mean':       float(f['sf'].attrs['w_mean']),
+            'size_ly':      float(f['sf'].attrs.get('size_ly', np.nan)),
             'flux_mad_std': float(f['sf'].attrs.get('flux_mad_std', np.nan)),
+            'row':          int(f.attrs.get('row', -1)),
+            'col':          int(f.attrs.get('col', -1)),
+            'size':         int(f.attrs.get('size', -1)),
         }
 
         fg   = f['fit']
@@ -1770,6 +1914,8 @@ def load_chunk_result(fn):
             'display_mask': fg['display_mask'][:].astype(bool),
             'log_s2_obs':   fg['log_s2_obs'][:],
         }
+        if 'jackknife' in fg:
+            fit['jackknife'] = dict(fg['jackknife'].attrs)
 
     return sf, fit
 
@@ -1779,29 +1925,25 @@ def load_chunk_result(fn):
 # ---------------------------------------------------------------------------
 
 def make_chunk_plots_pdf(res, pdf_path, vmin_sf=0.1, vmax_sf=3.0,
-                         vdiff=0.2, uv_range=0.32, **kwargs):
+                         vdiff=0.2, uv_range=0.32, data_dir='data', **kwargs):
     """
-    Render one plot_full_page per chunk and write to a PDF.
-
-    Parameters
-    ----------
-    res      : dict mapping filename -> {'sf': ..., 'fit': ...}
-               as returned by process_chunks().
-    pdf_path : output PDF path.
-    vmin_sf, vmax_sf, vdiff, uv_range : forwarded to plot_full_page.
-    **kwargs : additional keyword arguments forwarded to plot_full_page.
+    Render one plot_full_page per window and write to a PDF, ordered by (row,
+    col).  res maps result path -> {'sf': ..., 'fit': ...} (from process_chunks);
+    each window's image is re-read from the fullsky map via its geometry.
     """
     from matplotlib.backends.backend_pdf import PdfPages
 
-    fns = sorted(res, key=lambda f: int(
-        __import__('re').search(r'uvw_chunk_(\d+)', f).group(1)))
+    keys = sorted(res, key=lambda k: (res[k]['sf']['row'], res[k]['sf']['col']))
 
     with PdfPages(pdf_path) as pdf:
-        for fn in fns:
-            data = read_chunk(fn)
-            sf   = res[fn]['sf']
-            fit  = res[fn]['fit']
-            plot_full_page(sf, fit, data, chunk_id=fn,
+        for k in keys:
+            sf  = res[k]['sf']
+            fit = res[k]['fit']
+            row, col, size = sf['row'], sf['col'], sf['size']
+            data = read_window(row, col, size, size, data_dir=data_dir)
+            cid = window_chunk_id(row, col, size, data_dir)
+            label = f'r{row} c{col} s{size}' + (f' (chunk {cid})' if cid >= 0 else '')
+            plot_full_page(sf, fit, data, chunk_id=label,
                            vmin_sf=vmin_sf, vmax_sf=vmax_sf,
                            vdiff=vdiff, uv_range=uv_range,
                            newfig=True, **kwargs)
@@ -1813,29 +1955,102 @@ def make_chunk_plots_pdf(res, pdf_path, vmin_sf=0.1, vmax_sf=3.0,
 # Parallel batch processing
 # ---------------------------------------------------------------------------
 
-def _process_chunk(fn, max_nfev=None, background=0.03, arcsinh_scale=0.03,
-                   profile=None, weighting='1/r', min_n_fraction=0.1,
-                   fit_stride=1, assume_stationary=True):
+def _fit_scalars(params):
+    """Flatten a fit's params into scalar quantities to track across jackknife
+    samples: the raw L / profile params plus derived axes, angles [deg], and
+    drift rates."""
+    d = {k: float(v) for k, v in params.items()}
+    ax = principal_axes_from_params(params)
+    d['a1'], d['a2'], d['a3'] = ax['a1'], ax['a2'], ax['a3']
+    d['theta'] = float(np.degrees(ax['theta']))
+    d['phi']   = float(np.degrees(ax['phi']))
+    d['psi']   = float(np.degrees(ax['psi']))
+    d['du_per_dw'] = params['l13'] / params['s33']
+    d['dv_per_dw'] = params['l23'] / params['s33']
+    return d
+
+
+def _jackknife_stderr(samples):
+    """Block-jackknife standard error per quantity from N delete-one-block fits:
+    var = (N-1)/N * sum_i (x_i - mean)^2."""
+    out = {}
+    for k in samples[0]:
+        x = np.array([s[k] for s in samples], float)
+        x = x[np.isfinite(x)]
+        n = x.size
+        out[k] = (float(np.sqrt((n - 1) / n * np.sum((x - x.mean()) ** 2)))
+                  if n >= 2 else np.nan)
+    return out
+
+
+def _jackknife_fit(data, k, compute_kw, fit_kw):
+    """Delete each of k x k spatial blocks of the window in turn, refit, and
+    return {quantity: jackknife stderr}.  Blocks partition the window, so this is
+    a grouped (block) jackknife with N = k*k samples; k=2 is the quadrant scheme.
+
+    The spread across deletions estimates fit uncertainty, but is a LOWER bound —
+    the blocks share the field's large-scale correlated modes.  Principal-axis
+    angles can be noisy under axis flips.
+    """
+    flux = data['flux_epochs']
+    _, ny, nx = flux.shape
+    r_edges = np.linspace(0, ny, k + 1).astype(int)
+    c_edges = np.linspace(0, nx, k + 1).astype(int)
+    samples = []
+    for i in range(k):
+        for j in range(k):
+            d = dict(data)
+            f = flux.copy()
+            f[:, r_edges[i]:r_edges[i + 1], c_edges[j]:c_edges[j + 1]] = np.nan
+            d['flux_epochs'] = f
+            try:
+                sf = compute_s2(d, **compute_kw)
+                samples.append(_fit_scalars(fit_s2(sf, **fit_kw)['params']))
+            except Exception:
+                continue
+    return _jackknife_stderr(samples) if len(samples) >= 2 else {}
+
+
+def _process_window(spec, data_dir='data', max_nfev=None, background=0.03,
+                    arcsinh_scale=0.03, profile=None, weighting='1/r',
+                    min_n_fraction=0.1, fit_stride=1, assume_stationary=True,
+                    edge_mask_radius=50, min_coverage=0.25, jackknife_k=1):
+    row, col, size = _window_spec(spec, data_dir)
+    key = window_result_path(row, col, size, data_dir)
     try:
-        data = read_chunk(fn)
-        sf   = compute_s2(data, background=background, arcsinh_scale=arcsinh_scale,
+        data = read_window(row, col, size, size, data_dir=data_dir,
+                           edge_mask_radius=edge_mask_radius,
+                           min_coverage=min_coverage)
+        compute_kw = dict(background=background, arcsinh_scale=arcsinh_scale,
                           assume_stationary=assume_stationary)
-        fit  = fit_s2(sf, profile=profile, max_nfev=max_nfev, weighting=weighting,
+        fit_kw = dict(profile=profile, max_nfev=max_nfev, weighting=weighting,
                       min_n_fraction=min_n_fraction, fit_stride=fit_stride)
-        return fn, dict(sf=sf, fit=fit)
+        sf  = compute_s2(data, **compute_kw)
+        fit = fit_s2(sf, **fit_kw)
+        if jackknife_k > 1:
+            fit['jackknife'] = _jackknife_fit(data, jackknife_k,
+                                              compute_kw, fit_kw)
+        return key, dict(sf=sf, fit=fit)
     except Exception as exc:
-        return fn, exc
+        return key, exc
 
 
-def process_chunks(fns, n_workers=None, max_nfev=None,
+def process_chunks(specs=None, n_workers=None, max_nfev=None,
                    background=0.03, arcsinh_scale=0.03, profile=None,
                    weighting='1/r', min_n_fraction=0.1, fit_stride=1,
-                   assume_stationary=True):
+                   assume_stationary=True, edge_mask_radius=50,
+                   min_coverage=0.25, jackknife_k=1, data_dir='data'):
     """
-    Run read_chunk -> compute_s2 -> fit_s2 on each file in parallel.
+    Run read_window -> compute_s2 -> fit_s2 on each window in parallel.
 
-    Returns a dict mapping filename -> {'sf': ..., 'fit': ...}.
-    Failed chunks are printed and omitted from the result.
+    specs : iterable of window specs — a (row, col, size) triple, or a chunk
+            id / key (looked up in chunk_windows.csv).  None (default) runs all
+            official chunks (official_windows).  For the overlapping grid pass
+            window_grid(...).
+    jackknife_k : >1 also runs a k x k block jackknife per window (see
+            _jackknife_fit); 1 (default) skips it.
+    Returns a dict mapping the window's result path -> {'sf': ..., 'fit': ...}.
+    Failed windows are printed and omitted.
     """
     import multiprocessing
     from functools import partial
@@ -1845,21 +2060,32 @@ def process_chunks(fns, n_workers=None, max_nfev=None,
     except ImportError:
         wrap = lambda it, **kw: it
 
-    worker = partial(_process_chunk, max_nfev=max_nfev, background=background,
-                     arcsinh_scale=arcsinh_scale, profile=profile,
-                     weighting=weighting, min_n_fraction=min_n_fraction,
-                     fit_stride=fit_stride, assume_stationary=assume_stationary)
+    if specs is None:
+        specs = official_windows(data_dir)
+    specs = [_window_spec(s, data_dir) for s in specs]
+    # Build the fullmap edge mask once here so the spawned workers mmap it
+    # rather than each rebuilding it (which would load the whole noclip map).
+    if len(specs):
+        _fullsky_edge_mask(data_dir, edge_mask_radius)
+
+    worker = partial(_process_window, data_dir=data_dir, max_nfev=max_nfev,
+                     background=background, arcsinh_scale=arcsinh_scale,
+                     profile=profile, weighting=weighting,
+                     min_n_fraction=min_n_fraction, fit_stride=fit_stride,
+                     assume_stationary=assume_stationary,
+                     edge_mask_radius=edge_mask_radius, min_coverage=min_coverage,
+                     jackknife_k=jackknife_k)
     with multiprocessing.Pool(n_workers) as pool:
         items = list(wrap(
-            pool.imap_unordered(worker, fns),
-            total=len(fns)))
+            pool.imap_unordered(worker, specs),
+            total=len(specs)))
 
     res = {}
-    for fn, val in items:
+    for key, val in items:
         if isinstance(val, Exception):
-            print(f"FAILED {fn}: {val}")
+            print(f"FAILED {key}: {val}")
         else:
-            res[fn] = val
+            res[key] = val
     return res
 
 
@@ -1867,36 +2093,37 @@ def process_chunks(fns, n_workers=None, max_nfev=None,
 # Summary table
 # ---------------------------------------------------------------------------
 
-def summarize_chunks(res, profile=None):
+def summarize_chunks(res, profile=None, data_dir='data'):
     """
-    Build a numpy structured array summarising one entry per chunk from the
+    Build a numpy structured array summarising one entry per window from the
     dict returned by process_chunks().
 
-    Fields
+    Identity is the window geometry (row, col, size); chunk_id is a convenience
+    (the matching official chunk, or -1).  Fields
     ------
-    chunk_id   : integer parsed from filename
-    chunk_name : filename string (up to 128 chars)
-    u_mean, v_mean, w_mean : mean spatial coordinates of the chunk [ly]
-    du_per_dw, dv_per_dw   : apparent UV drift rate [ly / ly] = l13/s33, l23/s33;
-                             use for quiver(u_mean, v_mean, du_per_dw, dv_per_dw)
-    s11..var_inf           : raw fitted L-matrix parameters and Weibull params
+    row, col, size         : window origin [px] and side [px] (primary key)
+    size_ly                : window side [ly]
+    chunk_id               : matching official chunk id, or -1
+    u_mean, v_mean, w_mean : mean spatial coordinates of the window [ly]
+    du_per_dw, dv_per_dw   : apparent UV drift rate [ly / ly] = l13/s33, l23/s33
+    s11..<profile params>  : raw fitted L-matrix parameters and profile params
     a1, a2, a3             : principal semi-axes [ly], descending
     theta, phi, psi        : orientation of a1 [deg]; theta from W, phi in UV plane
-    a2_over_a1, a3_over_a1 : axis ratios (elongation diagnostics)
-    chi2_dof               : reduced chi-squared of the fit
-    n_pts                  : number of lag points used in fit
-    fit_success            : scipy optimizer success flag
-    n_epochs               : number of flux epochs in the chunk
-    w_span                 : max(W) - min(W) [ly]
+    *_err                  : jackknife stderrs (NaN if jackknife_k was 1)
+    chi2_dof, n_pts, fit_success, n_epochs, w_span, flux_mad_std
     """
-    import re
-
     if profile is None:
         profile = weibull_log_s2
 
+    jk_keys = ('a1', 'a2', 'a3', 'theta', 'phi', 'psi',
+               'du_per_dw', 'dv_per_dw')
+
     dtype = np.dtype([
+        ('row',          'i4'),
+        ('col',          'i4'),
+        ('size',         'i4'),
+        ('size_ly',      'f8'),
         ('chunk_id',     'i4'),
-        ('chunk_name',   'U128'),
         ('u_mean',       'f8'),
         ('v_mean',       'f8'),
         ('w_mean',       'f8'),
@@ -1915,6 +2142,7 @@ def summarize_chunks(res, profile=None):
         ('theta',        'f8'),
         ('phi',          'f8'),
         ('psi',          'f8'),
+    ] + [(f'{k}_err', 'f8') for k in jk_keys] + [
         ('chi2_dof',     'f8'),
         ('n_pts',        'i4'),
         ('fit_success',  '?'),
@@ -1924,17 +2152,14 @@ def summarize_chunks(res, profile=None):
     ])
 
     rows = []
-    for fn, val in res.items():
+    for val in res.values():
         sf  = val['sf']
         fit = val['fit']
         p   = fit['params']
 
-        m = re.search(r'uvw_chunk_(\d+)_products', fn)
-        chunk_id = int(m.group(1)) if m else -1
+        row, col, size = int(sf['row']), int(sf['col']), int(sf['size'])
+        chunk_id = window_chunk_id(row, col, size, data_dir)
 
-        u_mean   = sf['u_mean']
-        v_mean   = sf['v_mean']
-        w_mean   = sf['w_mean']
         W_values = sf['w_values']
         w_span   = float(W_values.max() - W_values.min())
         n_epochs = sum(1 for i, j in sf['epoch_pairs'] if i == j)
@@ -1950,23 +2175,26 @@ def summarize_chunks(res, profile=None):
         sum_w    = float(fw[fw > 0].sum())
         chi2_dof = float(np.sum(resid**2)) / sum_w
 
+        jk = fit.get('jackknife', {})
+        jk_vals = tuple(float(jk.get(k, np.nan)) for k in jk_keys)
         prof_vals = tuple(p[name] for name in profile.param_names)
         rows.append((
-            chunk_id, fn,
-            u_mean, v_mean, w_mean,
+            row, col, size, sf.get('size_ly', np.nan), chunk_id,
+            sf['u_mean'], sf['v_mean'], sf['w_mean'],
             p['l13'] / p['s33'], p['l23'] / p['s33'],
             p['s11'], p['s22'], p['s33'],
             p['l12'], p['l13'], p['l23'],
             *prof_vals,
             a1, a2, a3,
             np.degrees(theta), np.degrees(phi), np.degrees(psi),
+            *jk_vals,
             chi2_dof, n_pts, bool(fitres.success),
             n_epochs, w_span,
             sf.get('flux_mad_std', np.nan),
         ))
 
     out = np.array(rows, dtype=dtype)
-    return out[np.argsort(out['chunk_id'])]
+    return out[np.lexsort((out['col'], out['row']))]
 
 
 # ---------------------------------------------------------------------------

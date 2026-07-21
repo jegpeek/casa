@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Run process_chunks on all uvw_chunk_*_products.h5 files and save results."""
-import glob
+"""Run process_chunks on all official chunks (data/chunk_windows.csv) and save
+results."""
 import sys
 import os
 sys.path.insert(0, os.path.expanduser('~/projects/util_efs/python'))
@@ -13,15 +13,14 @@ if __name__ == '__main__':
         sys.exit(1)
 
     pdf_path = sys.argv[1]
-    fns = sorted(glob.glob('data/uvw_chunk_*_products.h5'))
-    fns = [f for f in fns if 'sf_angular' not in f]
-    print(f'Processing {len(fns)} chunks...')
+    specs = sf.official_windows()
+    print(f'Processing {len(specs)} chunks...')
 
-    res = sf.process_chunks(fns)
-    print(f'Completed {len(res)} / {len(fns)} chunks')
+    res = sf.process_chunks(specs)
+    print(f'Completed {len(res)} / {len(specs)} chunks')
 
-    for fn, val in res.items():
-        sf.save_chunk_result(fn, val['sf'], val['fit'])
+    for val in res.values():
+        sf.save_chunk_result(val['sf'], val['fit'])
     print('Saved all results.')
 
     sf.make_chunk_plots_pdf(res, pdf_path)
