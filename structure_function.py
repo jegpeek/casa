@@ -1818,6 +1818,7 @@ def save_chunk_result(sf, fit, out_fn=None, data_dir='data'):
     size = int(sf.get('size', -1))
     if out_fn is None:
         out_fn = window_result_path(row, col, size, data_dir)
+    os.makedirs(os.path.dirname(out_fn) or '.', exist_ok=True)
 
     fitres = fit['fit']                   # scipy OptimizeResult
     w      = fit['fit_weight']
@@ -2052,7 +2053,7 @@ def process_chunks(specs=None, n_workers=None, max_nfev=None,
                    weighting='1/r', min_n_fraction=0.1, fit_stride=1,
                    assume_stationary=True, edge_mask_radius=50,
                    min_coverage=0.25, jackknife_k=1, data_dir='data',
-                   save_dir='data', skip_existing=True):
+                   *, save_dir, skip_existing=True):
     """
     Run read_window -> compute_s2 -> fit_s2 on each window in parallel, STREAMING
     each window's full result to disk as it completes.
@@ -2066,9 +2067,12 @@ def process_chunks(specs=None, n_workers=None, max_nfev=None,
     specs : iterable of window specs — a (row, col, size) triple, or a chunk
             id / key (chunk_windows.csv).  None (default) runs all official
             chunks (official_windows); for the overlap grid pass window_grid(...).
-    save_dir : directory the sf_fit_*.h5 files are written to (default 'data').
+    save_dir : required output directory for the sf_fit_*.h5 files; created if
+            missing, and existing files in it are overwritten.
     skip_existing : skip windows whose output file already exists (default True),
-            so a crashed run resumes without recomputing finished windows.
+            so a crashed run resumes without recomputing finished windows.  NOTE:
+            existing files are trusted as-is, so after a code change use a fresh
+            save_dir or skip_existing=False to avoid mixing stale results.
     jackknife_k : >1 also runs a k x k block jackknife per window; 1 skips it.
 
     Returns the summary structured array (identical in construction to
@@ -2083,6 +2087,7 @@ def process_chunks(specs=None, n_workers=None, max_nfev=None,
     except ImportError:
         wrap = lambda it, **kw: it
 
+    os.makedirs(save_dir, exist_ok=True)
     if profile is None:
         profile = weibull_log_s2
     if specs is None:
