@@ -5,6 +5,7 @@ import sys
 import os
 sys.path.insert(0, os.path.expanduser('~/projects/util_efs/python'))
 
+import numpy as np
 import structure_function as sf
 
 if __name__ == '__main__':
@@ -16,12 +17,12 @@ if __name__ == '__main__':
     specs = sf.official_windows()
     print(f'Processing {len(specs)} chunks...')
 
-    res = sf.process_chunks(specs)
-    print(f'Completed {len(res)} / {len(specs)} chunks')
+    # process_chunks streams each sf_fit_*.h5 to data/ and returns the summary
+    summary = sf.process_chunks(specs)
+    print(f'Completed {len(summary)} / {len(specs)} chunks')
 
-    for val in res.values():
-        sf.save_chunk_result(val['sf'], val['fit'])
-    print('Saved all results.')
+    np.save('data/chunk_summary.npy', summary)
+    print('Wrote data/chunk_summary.npy')
 
-    sf.make_chunk_plots_pdf(res, pdf_path)
+    sf.make_chunk_plots_pdf(summary, pdf_path)
     print(f'PDF written to {pdf_path}')

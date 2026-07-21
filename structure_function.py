@@ -1932,17 +1932,16 @@ def make_chunk_plots_pdf(res, pdf_path, vmin_sf=0.1, vmax_sf=3.0,
                          vdiff=0.2, uv_range=0.32, data_dir='data', **kwargs):
     """
     Render one plot_full_page per window and write to a PDF, ordered by (row,
-    col).  res maps result path -> {'sf': ..., 'fit': ...} (from process_chunks);
-    each window's image is re-read from the fullsky map via its geometry.
+    col).  `res` may be a summary array (from process_chunks), a results dict, a
+    directory of sf_fit_*.h5, or an iterable of result paths; each window's
+    saved fit is loaded from disk one at a time and its image re-read from the
+    fullsky map, so this is memory-bounded regardless of grid size.
     """
     from matplotlib.backends.backend_pdf import PdfPages
 
-    keys = sorted(res, key=lambda k: (res[k]['sf']['row'], res[k]['sf']['col']))
-
     with PdfPages(pdf_path) as pdf:
-        for k in keys:
-            sf  = res[k]['sf']
-            fit = res[k]['fit']
+        for path in _result_paths(res, data_dir):
+            sf, fit = load_chunk_result(path)
             row, col, size = sf['row'], sf['col'], sf['size']
             data = read_window(row, col, size, size, data_dir=data_dir)
             cid = window_chunk_id(row, col, size, data_dir)
@@ -2015,13 +2014,21 @@ def _jackknife_fit(data, k, compute_kw, fit_kw):
     return _jackknife_stderr(samples) if len(samples) >= 2 else {}
 
 
-def _process_window(spec, data_dir='data', max_nfev=None, background=0.03,
-                    arcsinh_scale=0.03, profile=None, weighting='1/r',
-                    min_n_fraction=0.1, fit_stride=1, assume_stationary=True,
-                    edge_mask_radius=50, min_coverage=0.25, jackknife_k=1):
+def _process_window(spec, data_dir='data', save_dir='data', skip_existing=True,
+                    max_nfev=None, background=0.03, arcsinh_scale=0.03,
+                    profile=None, weighting='1/r', min_n_fraction=0.1,
+                    fit_stride=1, assume_stationary=True, edge_mask_radius=50,
+                    min_coverage=0.25, jackknife_k=1):
+    """Fit one window, STREAM its full arrays to disk, and return only its
+    summary record (or the Exception).  The big arrays never go back to the
+    parent, so peak memory is ~n_workers windows regardless of grid size."""
     row, col, size = _window_spec(spec, data_dir)
-    key = window_result_path(row, col, size, data_dir)
+    out = window_result_path(row, col, size, save_dir)
+    sp = profile if profile is not None else weibull_log_s2
     try:
+        if skip_existing and os.path.exists(out):
+            sf, fit = load_chunk_result(out)          # resume: no recompute
+            return out, _summary_record(sf, fit, sp, data_dir, save_dir)
         data = read_window(row, col, size, size, data_dir=data_dir,
                            edge_mask_radius=edge_mask_radius,
                            min_coverage=min_coverage)
@@ -2034,26 +2041,38 @@ def _process_window(spec, data_dir='data', max_nfev=None, background=0.03,
         if jackknife_k > 1:
             fit['jackknife'] = _jackknife_fit(data, jackknife_k,
                                               compute_kw, fit_kw)
-        return key, dict(sf=sf, fit=fit)
+        save_chunk_result(sf, fit, out_fn=out, data_dir=save_dir)
+        return out, _summary_record(sf, fit, sp, data_dir, save_dir)
     except Exception as exc:
-        return key, exc
+        return out, exc
 
 
 def process_chunks(specs=None, n_workers=None, max_nfev=None,
                    background=0.03, arcsinh_scale=0.03, profile=None,
                    weighting='1/r', min_n_fraction=0.1, fit_stride=1,
                    assume_stationary=True, edge_mask_radius=50,
-                   min_coverage=0.25, jackknife_k=1, data_dir='data'):
+                   min_coverage=0.25, jackknife_k=1, data_dir='data',
+                   save_dir='data', skip_existing=True):
     """
-    Run read_window -> compute_s2 -> fit_s2 on each window in parallel.
+    Run read_window -> compute_s2 -> fit_s2 on each window in parallel, STREAMING
+    each window's full result to disk as it completes.
+
+    Each window's arrays are written to save_dir/sf_fit_r<row>_c<col>_s<size>.h5
+    (via save_chunk_result); only its summary row comes back to the parent, so
+    peak memory is ~n_workers windows (~181 MB each) instead of growing with the
+    grid.  Reload the full arrays later with load_chunk_result / load_results, or
+    plot from disk with make_chunk_plots_pdf.
 
     specs : iterable of window specs — a (row, col, size) triple, or a chunk
-            id / key (looked up in chunk_windows.csv).  None (default) runs all
-            official chunks (official_windows).  For the overlapping grid pass
-            window_grid(...).
-    jackknife_k : >1 also runs a k x k block jackknife per window (see
-            _jackknife_fit); 1 (default) skips it.
-    Returns a dict mapping the window's result path -> {'sf': ..., 'fit': ...}.
+            id / key (chunk_windows.csv).  None (default) runs all official
+            chunks (official_windows); for the overlap grid pass window_grid(...).
+    save_dir : directory the sf_fit_*.h5 files are written to (default 'data').
+    skip_existing : skip windows whose output file already exists (default True),
+            so a crashed run resumes without recomputing finished windows.
+    jackknife_k : >1 also runs a k x k block jackknife per window; 1 skips it.
+
+    Returns the summary structured array (identical in construction to
+    summarize_chunks) — one row per completed window, each with its `path`.
     Failed windows are printed and omitted.
     """
     import multiprocessing
@@ -2064,6 +2083,8 @@ def process_chunks(specs=None, n_workers=None, max_nfev=None,
     except ImportError:
         wrap = lambda it, **kw: it
 
+    if profile is None:
+        profile = weibull_log_s2
     if specs is None:
         specs = official_windows(data_dir)
     specs = [_window_spec(s, data_dir) for s in specs]
@@ -2072,7 +2093,8 @@ def process_chunks(specs=None, n_workers=None, max_nfev=None,
     if len(specs):
         _fullsky_edge_mask(data_dir, edge_mask_radius)
 
-    worker = partial(_process_window, data_dir=data_dir, max_nfev=max_nfev,
+    worker = partial(_process_window, data_dir=data_dir, save_dir=save_dir,
+                     skip_existing=skip_existing, max_nfev=max_nfev,
                      background=background, arcsinh_scale=arcsinh_scale,
                      profile=profile, weighting=weighting,
                      min_n_fraction=min_n_fraction, fit_stride=fit_stride,
@@ -2084,50 +2106,34 @@ def process_chunks(specs=None, n_workers=None, max_nfev=None,
             pool.imap_unordered(worker, specs),
             total=len(specs)))
 
-    res = {}
-    for key, val in items:
+    records = []
+    for out, val in items:
         if isinstance(val, Exception):
-            print(f"FAILED {key}: {val}")
+            print(f"FAILED {out}: {val}")
         else:
-            res[key] = val
-    return res
+            records.append(val)
+    return _assemble_summary(records, profile)
 
 
 # ---------------------------------------------------------------------------
 # Summary table
 # ---------------------------------------------------------------------------
 
-def summarize_chunks(res, profile=None, data_dir='data'):
-    """
-    Build a numpy structured array summarising one entry per window from the
-    dict returned by process_chunks().
+# Jackknife quantities that get a *_err column in the summary.
+_SUMMARY_JK_KEYS = ('a1', 'a2', 'a3', 'theta', 'phi', 'psi',
+                    'du_per_dw', 'dv_per_dw')
 
-    Identity is the window geometry (row, col, size); chunk_id is a convenience
-    (the matching official chunk, or -1).  Fields
-    ------
-    row, col, size         : window origin [px] and side [px] (primary key)
-    size_ly                : window side [ly]
-    chunk_id               : matching official chunk id, or -1
-    u_mean, v_mean, w_mean : mean spatial coordinates of the window [ly]
-    du_per_dw, dv_per_dw   : apparent UV drift rate [ly / ly] = l13/s33, l23/s33
-    s11..<profile params>  : raw fitted L-matrix parameters and profile params
-    a1, a2, a3             : principal semi-axes [ly], descending
-    theta, phi, psi        : orientation of a1 [deg]; theta from W, phi in UV plane
-    *_err                  : jackknife stderrs (NaN if jackknife_k was 1)
-    chi2_dof, n_pts, fit_success, n_epochs, w_span, flux_mad_std
-    """
-    if profile is None:
-        profile = weibull_log_s2
 
-    jk_keys = ('a1', 'a2', 'a3', 'theta', 'phi', 'psi',
-               'du_per_dw', 'dv_per_dw')
-
-    dtype = np.dtype([
+def _summary_dtype(profile):
+    """Structured dtype for one summary row (shared by process_chunks streaming
+    output and summarize_chunks so there is a single summary definition)."""
+    return np.dtype([
         ('row',          'i4'),
         ('col',          'i4'),
         ('size',         'i4'),
         ('size_ly',      'f8'),
         ('chunk_id',     'i4'),
+        ('path',         'U160'),
         ('u_mean',       'f8'),
         ('v_mean',       'f8'),
         ('w_mean',       'f8'),
@@ -2146,7 +2152,7 @@ def summarize_chunks(res, profile=None, data_dir='data'):
         ('theta',        'f8'),
         ('phi',          'f8'),
         ('psi',          'f8'),
-    ] + [(f'{k}_err', 'f8') for k in jk_keys] + [
+    ] + [(f'{k}_err', 'f8') for k in _SUMMARY_JK_KEYS] + [
         ('chi2_dof',     'f8'),
         ('n_pts',        'i4'),
         ('fit_success',  '?'),
@@ -2155,50 +2161,125 @@ def summarize_chunks(res, profile=None, data_dir='data'):
         ('flux_mad_std', 'f8'),
     ])
 
-    rows = []
-    for val in res.values():
-        sf  = val['sf']
-        fit = val['fit']
-        p   = fit['params']
 
-        row, col, size = int(sf['row']), int(sf['col']), int(sf['size'])
-        chunk_id = window_chunk_id(row, col, size, data_dir)
+def _summary_record(sf, fit, profile, data_dir='data', save_dir=None):
+    """One summary-row tuple (matching _summary_dtype) for a fitted window — the
+    single record definition used by both the streaming worker and
+    summarize_chunks, so the two never diverge.  chunk_id is looked up in
+    data_dir (chunk_windows.csv); the `path` points into save_dir (where the
+    result file lives, = data_dir unless streaming elsewhere)."""
+    p = fit['params']
+    row, col, size = int(sf['row']), int(sf['col']), int(sf['size'])
+    chunk_id = window_chunk_id(row, col, size, data_dir)
+    path = window_result_path(row, col, size,
+                              data_dir if save_dir is None else save_dir)
 
-        W_values = sf['w_values']
-        w_span   = float(W_values.max() - W_values.min())
-        n_epochs = sum(1 for i, j in sf['epoch_pairs'] if i == j)
+    W_values = sf['w_values']
+    w_span   = float(W_values.max() - W_values.min())
+    n_epochs = sum(1 for i, j in sf['epoch_pairs'] if i == j)
 
-        ax = principal_axes_from_params(p)
-        a1, a2, a3 = ax['a1'], ax['a2'], ax['a3']
-        theta, phi, psi = ax['theta'], ax['phi'], ax['psi']
+    ax = principal_axes_from_params(p)
+    fitres   = fit['fit']
+    resid    = fitres.fun
+    n_pts    = len(fit['log_s2_obs'])
+    fw       = fit['fit_weight']
+    sum_w    = float(fw[fw > 0].sum())
+    chi2_dof = float(np.sum(resid**2)) / sum_w
 
-        fitres   = fit['fit']
-        resid    = fitres.fun
-        n_pts    = len(fit['log_s2_obs'])
-        fw       = fit['fit_weight']
-        sum_w    = float(fw[fw > 0].sum())
-        chi2_dof = float(np.sum(resid**2)) / sum_w
+    jk = fit.get('jackknife', {})
+    jk_vals = tuple(float(jk.get(k, np.nan)) for k in _SUMMARY_JK_KEYS)
+    prof_vals = tuple(p[name] for name in profile.param_names)
+    return (
+        row, col, size, sf.get('size_ly', np.nan), chunk_id, path,
+        sf['u_mean'], sf['v_mean'], sf['w_mean'],
+        p['l13'] / p['s33'], p['l23'] / p['s33'],
+        p['s11'], p['s22'], p['s33'],
+        p['l12'], p['l13'], p['l23'],
+        *prof_vals,
+        ax['a1'], ax['a2'], ax['a3'],
+        np.degrees(ax['theta']), np.degrees(ax['phi']), np.degrees(ax['psi']),
+        *jk_vals,
+        chi2_dof, n_pts, bool(fitres.success),
+        n_epochs, w_span,
+        sf.get('flux_mad_std', np.nan),
+    )
 
-        jk = fit.get('jackknife', {})
-        jk_vals = tuple(float(jk.get(k, np.nan)) for k in jk_keys)
-        prof_vals = tuple(p[name] for name in profile.param_names)
-        rows.append((
-            row, col, size, sf.get('size_ly', np.nan), chunk_id,
-            sf['u_mean'], sf['v_mean'], sf['w_mean'],
-            p['l13'] / p['s33'], p['l23'] / p['s33'],
-            p['s11'], p['s22'], p['s33'],
-            p['l12'], p['l13'], p['l23'],
-            *prof_vals,
-            a1, a2, a3,
-            np.degrees(theta), np.degrees(phi), np.degrees(psi),
-            *jk_vals,
-            chi2_dof, n_pts, bool(fitres.success),
-            n_epochs, w_span,
-            sf.get('flux_mad_std', np.nan),
-        ))
 
-    out = np.array(rows, dtype=dtype)
-    return out[np.lexsort((out['col'], out['row']))]
+def _assemble_summary(records, profile):
+    """Stack summary-row tuples into the structured array, ordered by (row, col).
+    Both process_chunks (streaming) and summarize_chunks end here, so their
+    outputs are identical in construction."""
+    out = np.array(records, dtype=_summary_dtype(profile))
+    return out[np.lexsort((out['col'], out['row']))] if out.size else out
+
+
+def _iter_results(res):
+    """Yield (sf, fit) from either an in-memory {key: {sf, fit}} dict or an
+    iterable of saved result paths (loaded one at a time, bounding memory)."""
+    if isinstance(res, dict):
+        for v in res.values():
+            yield v['sf'], v['fit']
+    else:
+        for path in res:
+            yield load_chunk_result(path)
+
+
+def summarize_chunks(res, profile=None, data_dir='data'):
+    """
+    Build a numpy structured array summarising one row per window.
+
+    res : an in-memory {key: {sf, fit}} dict, OR an iterable of saved result
+          paths (loaded one at a time).  The rows are the same _summary_record
+          tuples that process_chunks streams back, so the two agree exactly.
+
+    Identity is the window geometry (row, col, size), with a `path` to the saved
+    HDF5 and a convenience `chunk_id` (matching official chunk, or -1).  Fields:
+    row, col, size, size_ly, chunk_id, path, u_mean, v_mean, w_mean,
+    du_per_dw, dv_per_dw, s11..<profile params>, a1, a2, a3, theta, phi, psi,
+    *_err (jackknife stderrs; NaN if jackknife_k was 1),
+    chi2_dof, n_pts, fit_success, n_epochs, w_span, flux_mad_std.
+    """
+    if profile is None:
+        profile = weibull_log_s2
+    records = [_summary_record(sf, fit, profile, data_dir)
+               for sf, fit in _iter_results(res)]
+    return _assemble_summary(records, profile)
+
+
+def load_results(paths):
+    """Rebuild the full in-memory {path: {sf, fit}} dict from saved result paths
+    (only when it fits — ~181 MB per window; fine for the official 115, not the
+    468-window overlap grid).  Accepts a summary array (uses its `path` column),
+    a directory, or an iterable of paths."""
+    return {p: dict(zip(('sf', 'fit'), load_chunk_result(p)))
+            for p in _result_paths(paths)}
+
+
+def _parse_result_path(path):
+    """(row, col, size) parsed from an sf_fit_r*_c*_s*.h5 path (for ordering)."""
+    m = re.search(r'sf_fit_r(-?\d+)_c(-?\d+)_s(\d+)\.h5$', os.path.basename(path))
+    return tuple(int(x) for x in m.groups()) if m else (0, 0, 0)
+
+
+def _result_paths(res, save_dir='data'):
+    """Sorted result paths from a summary structured array (its `path` column),
+    a results dict, a directory, or an iterable of paths."""
+    if isinstance(res, np.ndarray) and res.dtype.names and 'path' in res.dtype.names:
+        paths = [str(p) for p in res['path']]
+    elif isinstance(res, dict):
+        paths = list(res)
+    elif isinstance(res, str):
+        import glob
+        paths = glob.glob(f'{res}/sf_fit_r*_c*_s*.h5')
+    else:
+        paths = list(res)
+    return sorted(paths, key=_parse_result_path)
+
+
+def result_paths(save_dir='data'):
+    """Sorted list of saved sf_fit_*.h5 result files in `save_dir` (e.g. to
+    reload / re-summarise a finished run: summarize_chunks(result_paths()))."""
+    return _result_paths(save_dir)
 
 
 # ---------------------------------------------------------------------------
