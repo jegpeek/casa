@@ -2015,7 +2015,7 @@ def _jackknife_fit(data, k, compute_kw, fit_kw):
     return _jackknife_stderr(samples) if len(samples) >= 2 else {}
 
 
-def _process_window(spec, data_dir='data', save_dir='data', skip_existing=True,
+def _process_window(spec, data_dir='data', save_dir='data', skip_existing=False,
                     max_nfev=None, background=0.03, arcsinh_scale=0.03,
                     profile=None, weighting='1/r', min_n_fraction=0.1,
                     fit_stride=1, assume_stationary=True, edge_mask_radius=50,
@@ -2053,7 +2053,7 @@ def process_chunks(specs=None, n_workers=None, max_nfev=None,
                    weighting='1/r', min_n_fraction=0.1, fit_stride=1,
                    assume_stationary=True, edge_mask_radius=50,
                    min_coverage=0.25, jackknife_k=1, data_dir='data',
-                   *, save_dir, skip_existing=True):
+                   *, save_dir, skip_existing=False):
     """
     Run read_window -> compute_s2 -> fit_s2 on each window in parallel, STREAMING
     each window's full result to disk as it completes.
@@ -2069,10 +2069,10 @@ def process_chunks(specs=None, n_workers=None, max_nfev=None,
             chunks (official_windows); for the overlap grid pass window_grid(...).
     save_dir : required output directory for the sf_fit_*.h5 files; created if
             missing, and existing files in it are overwritten.
-    skip_existing : skip windows whose output file already exists (default True),
-            so a crashed run resumes without recomputing finished windows.  NOTE:
-            existing files are trusted as-is, so after a code change use a fresh
-            save_dir or skip_existing=False to avoid mixing stale results.
+    skip_existing : default False recomputes and overwrites every window.  Set
+            True only to resume a crashed run — it skips windows whose output
+            file already exists, trusting them as-is (so don't resume across a
+            code change, or you'll mix stale results).
     jackknife_k : >1 also runs a k x k block jackknife per window; 1 skips it.
 
     Returns the summary structured array (identical in construction to
