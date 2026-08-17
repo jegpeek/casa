@@ -1,9 +1,12 @@
-# Bulk input arrays live in Dropbox and are symlinked into data/ (see README).
-data/
+# Bulk input arrays are symlinked into data/ from Dropbox (see README).
+# data/chunk_windows.csv IS tracked upstream, so ignore by pattern, not wholesale.
+data/*.npy
+data/sf_fits/
+data/jk_q4/
+data/jk_sub200/
 __pycache__/
 *.pyc
 *.log
-# Generated per-window fit outputs and scratch
 handoff/
 chunk_fits.pdf
 chunk_summary.npy
