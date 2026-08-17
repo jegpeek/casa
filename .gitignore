@@ -1,0 +1,9 @@
+# Bulk input arrays live in Dropbox and are symlinked into data/ (see README).
+data/
+__pycache__/
+*.pyc
+*.log
+# Generated per-window fit outputs and scratch
+handoff/
+chunk_fits.pdf
+chunk_summary.npy
