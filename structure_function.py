@@ -682,7 +682,8 @@ def get_sf_2d(image):
 # Each profile is a callable: profile(r, params_array) -> log10(S2)
 # with attached metadata: .n_params, .param_names, .default_guess
 # (None entries in default_guess are replaced by a data-driven amplitude
-# estimate inside fit_s2).
+# estimate inside fit_s2; a CALLABLE entry is called with that amplitude and
+# returns the guess, for parameters that should start at a fraction of it).
 #
 # The full parameter vector used by the optimizer is always:
 #   [s11, s22, s33, l12, l13, l23,  <-- 6 geometric (L-matrix) params
@@ -698,6 +699,39 @@ weibull_log_s2.n_params      = 3
 weibull_log_s2.param_names   = ['alpha', 'beta', 'var_inf']
 weibull_log_s2.default_guess = [0.4, 2.0, None]   # None → data-driven
 weibull_log_s2.param_bounds  = [(1e-3, np.inf), (1.0, 10.0), (1e-6, 4.0)]
+
+
+def weibull_noise_log_s2(r, params):
+    """S2 = var_inf * (1 - exp(-r^beta))^(alpha/beta) + s2_noise
+
+    As weibull_log_s2, plus an explicit additive noise pedestal.
+
+    Independent per-pixel measurement noise contributes a CONSTANT 2*sigma_n^2
+    to S2 at every non-zero lag: differencing two pixels adds their noise
+    variances, and that offset does not average away with more lag pairs (it is
+    a bias, not a variance).  The offset-free weibull has nowhere to put it, so
+    the optimiser absorbs it into the shape parameters — and because the
+    pedestal dominates where S2_true is smallest, it flattens the SMALL-lag end
+    specifically, biasing alpha low and inflating the correlation length.
+
+    Fitting the pedestal instead of ignoring it also propagates its uncertainty
+    into the parameter errors, which subtracting a pre-measured floor would not.
+
+    s2_noise is added in LINEAR S2 space, before the log, because that is where
+    the noise variance actually adds.
+    """
+    alpha, beta, var_inf, s2_noise = params
+    weibull = np.maximum(-np.expm1(-r ** beta), 1e-300)
+    s2 = var_inf * weibull ** (alpha / beta) + s2_noise
+    return np.log10(np.maximum(s2, 1e-300))
+
+weibull_noise_log_s2.n_params    = 4
+weibull_noise_log_s2.param_names = ['alpha', 'beta', 'var_inf', 's2_noise']
+# s2_noise starts at a small fraction of the inner-S2 amplitude: it is strongly
+# constrained by the small-lag data, so the guess only needs the right decade.
+weibull_noise_log_s2.default_guess = [0.4, 2.0, None, lambda amp: 0.1 * amp]
+weibull_noise_log_s2.param_bounds  = [(1e-3, np.inf), (1.0, 10.0),
+                                      (1e-6, 4.0), (1e-8, 4.0)]
 
 
 def broken_pl_log_s2(r, params):
@@ -1285,7 +1319,8 @@ def fit_s2(result: dict,
     # guess (single evaluation, no optimisation) to avoid basin-of-attraction
     # sensitivity to the scale parameter.
     _scales = (0.05, 0.1, 0.2, 0.3)
-    _prof_defaults = [amp_guess if d is None else d
+    _prof_defaults = [amp_guess if d is None else
+                      (d(amp_guess) if callable(d) else d)
                       for d in profile.default_guess]
     best_scale, best_chi2 = _scales[0], np.inf
     for _s in _scales:
@@ -1299,7 +1334,9 @@ def fit_s2(result: dict,
     geom_p0 = [g.get(k, auto_geom[k]) for k in _GEOM_KEYS]
     prof_bounds = getattr(profile, 'param_bounds',
                           [(-np.inf, np.inf)] * profile.n_params)
-    prof_p0  = [np.clip(g.get(name, (amp_guess if default is None else default)),
+    prof_p0  = [np.clip(g.get(name, (amp_guess if default is None else
+                                     (default(amp_guess) if callable(default)
+                                      else default))),
                         b[0], b[1])
                 for name, default, b in zip(profile.param_names,
                                             profile.default_guess,
