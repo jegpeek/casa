@@ -2246,13 +2246,18 @@ def _iter_results(res):
             yield load_chunk_result(path)
 
 
-def summarize_chunks(res, profile=None, data_dir='data'):
+def summarize_chunks(res, profile=None, data_dir='data', save_dir=None):
     """
     Build a numpy structured array summarising one row per window.
 
     res : an in-memory {key: {sf, fit}} dict, OR an iterable of saved result
           paths (loaded one at a time).  The rows are the same _summary_record
           tuples that process_chunks streams back, so the two agree exactly.
+
+    data_dir holds chunk_windows.csv (for the chunk_id lookup); save_dir is
+    where the result files live, and defaults to data_dir.  Pass save_dir
+    explicitly when results were streamed elsewhere, so the summary's `path`
+    column points at the files that actually exist.
 
     Identity is the window geometry (row, col, size), with a `path` to the saved
     HDF5 and a convenience `chunk_id` (matching official chunk, or -1).  Fields:
@@ -2263,7 +2268,7 @@ def summarize_chunks(res, profile=None, data_dir='data'):
     """
     if profile is None:
         profile = weibull_log_s2
-    records = [_summary_record(sf, fit, profile, data_dir)
+    records = [_summary_record(sf, fit, profile, data_dir, save_dir)
                for sf, fit in _iter_results(res)]
     return _assemble_summary(records, profile)
 
