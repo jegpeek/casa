@@ -1082,9 +1082,13 @@ def _make_fit_data(sf, inner_uv_pixels, min_same_epoch_lag_pix, s2_floor,
     epoch_pairs = sf['epoch_pairs']
 
     n_pairs, n_lag_v, n_lag_u = s2_arr.shape
-    p    = inner_uv_pixels
     cv   = n_lag_v // 2
     cu   = n_lag_u // 2
+    # Clamp the half-width to what the lag axes actually hold.  Without this a
+    # window smaller than ~2*inner_uv_pixels gives cu - p < 0, and the negative
+    # slice start silently returns a 1-element view instead of raising, so the
+    # mask shapes disagree downstream ("non-broadcastable output operand").
+    p    = int(min(inner_uv_pixels, cu, cv))
     v_sl = slice(cv - p, cv + p)
     u_sl = slice(cu - p, cu + p)
 
