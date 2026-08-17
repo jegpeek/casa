@@ -119,8 +119,17 @@ def window_result_path(row, col, size, data_dir='data'):
 
 def window_chunk_id(row, col, size, data_dir='data'):
     """Official chunk id whose window equals (row, col, size), or -1 if none —
-    a convenience so one can still refer to a window by its old chunk index."""
-    for cid, rcs in _load_chunk_windows(data_dir).items():
+    a convenience so one can still refer to a window by its old chunk index.
+
+    Returns -1 if chunk_windows.csv is absent from data_dir: this is a labelling
+    convenience, so a missing table must not abort a caller mid-write (it used
+    to raise FileNotFoundError from inside save_chunk_result, leaving truncated
+    result files that held only their root attrs)."""
+    try:
+        windows = _load_chunk_windows(data_dir)
+    except FileNotFoundError:
+        return -1
+    for cid, rcs in windows.items():
         if rcs == (row, col, size):
             return cid
     return -1
@@ -2042,9 +2051,17 @@ def _process_window(spec, data_dir='data', save_dir='data', skip_existing=False,
         if jackknife_k > 1:
             fit['jackknife'] = _jackknife_fit(data, jackknife_k,
                                               compute_kw, fit_kw)
-        save_chunk_result(sf, fit, out_fn=out, data_dir=save_dir)
+        save_chunk_result(sf, fit, out_fn=out, data_dir=data_dir)
         return out, _summary_record(sf, fit, sp, data_dir, save_dir)
     except Exception as exc:
+        # Delete any partially-written result: save_chunk_result opens the file
+        # and writes incrementally, so a mid-write failure otherwise leaves a
+        # plausible-looking stub on disk that skip_existing would later trust.
+        if os.path.exists(out):
+            try:
+                os.remove(out)
+            except OSError:
+                pass
         return out, exc
 
 
