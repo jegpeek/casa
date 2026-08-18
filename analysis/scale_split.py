@@ -119,6 +119,25 @@ def _fit_one(s2_band, stride):
         return {'error': repr(exc)}
 
 
+def _delete_block(data, i, j, k):
+    """Copy of `data` with spatial block (i, j) of a k x k grid set to NaN.
+
+    This is the project's standard jackknife blocking: delete one rectangular
+    patch of the image (all epochs), refit, and take the spread over the k^2
+    refits.  Factored out here so scale_split and scale_profile use exactly the
+    same block definition.
+    """
+    flux = data['flux_epochs']
+    _, ny, nx = flux.shape
+    r_edges = np.linspace(0, ny, k + 1).astype(int)
+    c_edges = np.linspace(0, nx, k + 1).astype(int)
+    d2 = dict(data)
+    f2 = np.array(flux, copy=True)
+    f2[:, r_edges[i]:r_edges[i + 1], c_edges[j]:c_edges[j + 1]] = np.nan
+    d2['flux_epochs'] = f2
+    return d2
+
+
 def _fit_bands(data, r_split, stride, r_grid=None):
     """Fit inner band, outer band, and the full band on one image realisation."""
     s2 = sf.compute_s2(data, **COMPUTE_KW)
@@ -165,18 +184,10 @@ def _one_window(spec):
 
     central, _ = _fit_bands(data, r_split, stride, r_grid=r_grid)
 
-    flux = data['flux_epochs']
-    _, ny, nx = flux.shape
-    r_edges = np.linspace(0, ny, K + 1).astype(int)
-    c_edges = np.linspace(0, nx, K + 1).astype(int)
-
     samples = []
     for i in range(K):
         for j in range(K):
-            d2 = dict(data)
-            f2 = np.array(flux, copy=True)
-            f2[:, r_edges[i]:r_edges[i + 1], c_edges[j]:c_edges[j + 1]] = np.nan
-            d2['flux_epochs'] = f2
+            d2 = _delete_block(data, i, j, K)
             rec, _ = _fit_bands(d2, r_split, stride)
             rec['block'] = [i, j]
             samples.append(rec)
