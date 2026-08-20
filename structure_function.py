@@ -754,6 +754,37 @@ broken_pl_log_s2.param_bounds  = [(1e-3, np.inf), (1e-3, np.inf),
                                    (1e-4, np.inf), (1e-6, np.inf)]
 
 
+def power_law_log_s2(r, params):
+    """S2 = A * r^alpha  -- the exact r -> 0 limit of weibull_log_s2.
+
+    Since 1 - exp(-r^beta) -> r^beta as r -> 0, weibull_log_s2 tends to
+    var_inf * r^alpha with NO dependence on beta.  So on a lag range that
+    stops well short of the saturation scale a1, the Weibull's beta and
+    var_inf are not separately constrained and this 2-parameter form is the
+    honest model: it fits the same curve with two fewer free parameters.
+
+    IMPORTANT -- exact scale degeneracy.  log10 S2 = log10 A + alpha*log10 r
+    and r = |L^-1 lag|, so scaling every geometric axis by k rescales r by
+    1/k and shifts log10 S2 by -alpha*log10 k, which A absorbs exactly.  The
+    overall SIZE of the ellipsoid is therefore unidentifiable (a flat
+    direction in the least-squares problem) while the axis RATIOS and the
+    orientation are unaffected.  Callers must break it, e.g.
+
+        fit_s2(..., profile=power_law_log_s2, freeze=('A',))
+
+    which holds A at its initial value and lets the geometry carry the
+    amplitude.  a1/a2/a3 are then only meaningful up to a common factor --
+    read a2/a1, a3/a2 and the angles, never a1 itself.
+    """
+    alpha, A = params
+    return np.log10(A) + alpha * np.log10(r)
+
+power_law_log_s2.n_params      = 2
+power_law_log_s2.param_names   = ['alpha', 'A']
+power_law_log_s2.default_guess = [0.4, None]   # None -> data-driven amplitude
+power_law_log_s2.param_bounds  = [(1e-3, np.inf), (1e-6, np.inf)]
+
+
 # ---------------------------------------------------------------------------
 # Model evaluation
 # ---------------------------------------------------------------------------
@@ -1097,6 +1128,59 @@ def principal_axes_from_params(params):
     return dict(a1=a1, a2=a2, a3=a3, theta=theta, phi=phi, psi=psi)
 
 
+def principal_axes_2d(params):
+    """
+    In-plane (UV) principal axes of the dW=0 slice of the ellipsoid.
+
+    At dW=0 the ellipsoidal radius r = |L^-1 dr| depends ONLY on s11, s22, l12
+    (the upper-left 2x2 block L2 of L): the xw term vanishes, so s33, l13, l23
+    drop out identically.  The UV shape matrix is therefore exactly C2 = L2 L2^T,
+    which is the central SLICE of the 3D ellipsoid through the plane dW=0 -- the
+    Schur complement of C, not the projection of C onto the plane.  The slice is
+    what a single-epoch image measures; the projection would be what an
+    integrated-along-W measurement measures, and the two differ.
+
+    Parameters
+    ----------
+    params : dict with keys s11, s22, l12 (extra keys ignored)
+             or array-like [s11, s22, s33, l12, ...] in _GEOM_KEYS order
+
+    Returns
+    -------
+    dict with keys:
+      b1, b2 : float -- in-plane semi-axis lengths [ly], b1 >= b2
+      pa     : float -- position angle of b1 from +U toward +V [rad], in [0, pi)
+    """
+    if isinstance(params, dict):
+        s11, s22, l12 = params['s11'], params['s22'], params['l12']
+    else:
+        s11, s22, l12 = params[0], params[1], params[3]
+
+    L2 = np.array([[s11, l12], [0.0, s22]])
+    C2 = L2 @ L2.T
+    eigvals, Q = np.linalg.eigh(C2)
+    idx = np.argsort(eigvals)[::-1]
+    b1, b2 = np.sqrt(np.maximum(eigvals[idx], 0.0))
+    n1 = Q[:, idx[0]]
+    pa = float(np.arctan2(n1[1], n1[0]) % np.pi)
+    return dict(b1=float(b1), b2=float(b2), pa=pa)
+
+
+def slice_axes_from_3d(params):
+    """
+    The dW=0 in-plane axes IMPLIED by a full 3D fit.
+
+    This is the 3D model's prediction for what the 2D (UV-plane) fit should
+    recover, and is the quantity to compare against principal_axes_2d of an
+    independent 2D fit.  Because the dW=0 residuals depend only on s11/s22/l12,
+    this is just principal_axes_2d applied to the 3D parameters -- i.e. the 2D
+    fit is a strict SUBSPACE of the 3D model, not a different model.
+
+    Returns dict(b1, b2, pa) as principal_axes_2d.
+    """
+    return principal_axes_2d(params)
+
+
 def _make_fit_data(sf, inner_uv_pixels, min_same_epoch_lag_pix, s2_floor,
                    min_n_fraction=0.1, fit_stride=1):
     """Select lag points for fitting; shared by fit_s2 and build_fit_result.
@@ -1276,7 +1360,8 @@ def fit_s2(result: dict,
            min_n_fraction: float = 0.1,
            fit_stride: int = 1,
            max_nfev: int | None = None,
-           weighting='1/r') -> dict:
+           weighting='1/r',
+           freeze: tuple = ()) -> dict:
     """
     Fit S2(dU, dV, dW) to the structure function using a pluggable 1D profile.
 
@@ -1296,6 +1381,14 @@ def fit_s2(result: dict,
     s2_floor            : S2 values below this are clipped before taking log
     noise_scale_dex     : residuals divided by this (inlier/outlier boundary)
     max_nfev            : maximum function evaluations (None = unlimited)
+    freeze              : names of parameters to hold FIXED at their initial
+                          value (from `guess`, else the auto guess) and remove
+                          from the optimisation vector.  Used by the UV-plane
+                          (2D) fit, where the dW=0 residuals are exactly
+                          independent of s33/l13/l23 so those three directions
+                          have identically zero gradient and must not be
+                          optimised.  freeze=() (default) is numerically
+                          identical to the unmodified solver.
     """
     if profile is None:
         profile = weibull_log_s2
@@ -1383,6 +1476,22 @@ def fit_s2(result: dict,
 
     q0 = _to_opt(p0)
 
+    # Frozen parameters are held at q0 and dropped from the optimisation vector.
+    _all_names = list(_GEOM_KEYS) + list(profile.param_names)
+    _bad = [f for f in freeze if f not in _all_names]
+    if _bad:
+        raise ValueError(f'freeze: unknown parameter(s) {_bad}; '
+                         f'valid names are {_all_names}')
+    _frozen = np.array([n in freeze for n in _all_names])
+    _free = ~_frozen
+    _q_fixed = q0.copy()
+
+    def _embed(q_free):
+        """Full q vector from the free subset."""
+        q = _q_fixed.copy()
+        q[_free] = q_free
+        return q
+
     def _residuals(q):
         return sqrt_w * (log_s2_obs - log_s2_model(_from_opt(q), lags_flat,
                                                     profile=profile)) / noise_scale_dex
@@ -1391,20 +1500,29 @@ def fit_s2(result: dict,
     # already reasonable before geometry is allowed to move.
     geom_q0 = q0[:_N_GEOM]
     prof_q0  = q0[_N_GEOM:]
+    _prof_free = _free[_N_GEOM:]
 
-    def _residuals_profile(prof_q):
-        return _residuals(np.concatenate([geom_q0, prof_q]))
+    def _residuals_profile(prof_q_free):
+        pq = prof_q0.copy()
+        pq[_prof_free] = prof_q_free
+        return _residuals(np.concatenate([geom_q0, pq]))
 
-    pre = least_squares(_residuals_profile, prof_q0, loss='linear',
-                        max_nfev=200,
-                        bounds=(q_lo[_N_GEOM:], q_hi[_N_GEOM:]))
-    q0 = np.concatenate([geom_q0, pre.x])
+    if _prof_free.any():
+        pre = least_squares(_residuals_profile, prof_q0[_prof_free],
+                            loss='linear', max_nfev=200,
+                            bounds=(q_lo[_N_GEOM:][_prof_free],
+                                    q_hi[_N_GEOM:][_prof_free]))
+        prof_q0 = prof_q0.copy()
+        prof_q0[_prof_free] = pre.x
+    q0 = np.concatenate([geom_q0, prof_q0])
+    _q_fixed = q0.copy()
 
     # Stage 2: full optimisation from the pre-warmed starting point.
-    fit = least_squares(_residuals, q0, loss='linear',
-                        max_nfev=max_nfev, bounds=(q_lo, q_hi))
+    fit = least_squares(lambda qf: _residuals(_embed(qf)), q0[_free],
+                        loss='linear', max_nfev=max_nfev,
+                        bounds=(q_lo[_free], q_hi[_free]))
 
-    fit_params = _from_opt(fit.x)
+    fit_params = _from_opt(_embed(fit.x))
 
     out = build_fit_result(result, fit_params, profile=profile,
                            inner_uv_pixels=inner_uv_pixels,
@@ -2021,6 +2139,13 @@ def _fit_scalars(params):
     d['psi']   = float(np.degrees(ax['psi']))
     d['du_per_dw'] = params['l13'] / params['s33']
     d['dv_per_dw'] = params['l23'] / params['s33']
+    # In-plane (dW=0 slice) axes.  For a 3D fit these are the model's PREDICTION
+    # for the 2D fit; for a 2D fit they are the measurement.  Same function
+    # either way, so the two are directly comparable.
+    ax2 = principal_axes_2d(params)
+    d['b1'], d['b2'] = ax2['b1'], ax2['b2']
+    d['b2b1'] = ax2['b2'] / ax2['b1'] if ax2['b1'] > 0 else float('nan')
+    d['pa2d'] = float(np.degrees(ax2['pa']))
     return d
 
 
