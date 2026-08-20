@@ -49,7 +49,7 @@ import structure_function as sf  # noqa: E402
 import scale_split as ss  # noqa: E402
 import scale_profile as sp  # noqa: E402
 
-K = 2                       # 2x2 spatial block jackknife, as everywhere else
+K_DEFAULT = 2               # 2x2 spatial block jackknife, as everywhere else
 FREEZE_2D = ('s33', 'l13', 'l23')
 
 # Quantities carried through the jackknife.  Ratios and angles only for the
@@ -130,7 +130,7 @@ def _dw0(s2):
 
 
 def _one_window(spec):
-    row, col, size, stride, rcut, out_dir = spec
+    row, col, size, stride, rcut, out_dir, k_blocks = spec
     path = os.path.join(out_dir, f'sb_r{row}_c{col}_s{size}.json')
     if os.path.exists(path):
         return path, 'cached'
@@ -140,13 +140,15 @@ def _one_window(spec):
                           data_dir=os.path.join(_ROOT, 'data'), **ss.READ_KW)
     central, r_grid = _fit_all_modes(data, rcut, stride)
     samples = []
-    for i in range(K):
-        for j in range(K):
-            d2 = ss._delete_block(data, i, j, K)
+    for i in range(k_blocks):
+        for j in range(k_blocks):
+            d2 = ss._delete_block(data, i, j, k_blocks)
             fits, _ = _fit_all_modes(d2, rcut, stride, r_grid=r_grid)
-            samples.append({'%s|%s' % k: v for k, v in fits.items()})
+            rec = {'%s|%s' % kk: v for kk, v in fits.items()}
+            rec['block'] = [i, j]
+            samples.append(rec)
 
-    out = dict(row=row, col=col, size=size, k=K, fit_stride=stride,
+    out = dict(row=row, col=col, size=size, k=k_blocks, fit_stride=stride,
                rcut=rcut, frozen_2d=list(FREEZE_2D),
                central={'%s|%s' % k: v for k, v in central.items()},
                samples=samples, seconds=time.time() - t0)
@@ -212,6 +214,10 @@ def main():
     ap.add_argument('--stride', type=int, default=2)
     ap.add_argument('--size', type=int, default=400)
     ap.add_argument('--procs', type=int, default=6)
+    ap.add_argument('--k', type=int, default=K_DEFAULT,
+                    help='jackknife blocking: k x k spatial blocks, k^2 refits '
+                         'per window. NB the output directory encodes k, so '
+                         'different k never share a cache.')
     ap.add_argument('--windows', default=None,
                     help='JSON file with [[row, col], ...]; default = the '
                          'top-SNR-quartile set used elsewhere')
@@ -230,9 +236,11 @@ def main():
         raise SystemExit('--windows is required (pass the window list as JSON)')
 
     tag = 'r%g_s%d' % (args.rcut, args.stride)
+    if args.k != K_DEFAULT:
+        tag += '_k%d' % args.k
     out_dir = args.out_dir or os.path.join(_ROOT, 'results',
                                            'singleband_%s' % tag)
-    jobs = [(r, c, args.size, args.stride, args.rcut, out_dir)
+    jobs = [(r, c, args.size, args.stride, args.rcut, out_dir, args.k)
             for r, c in specs]
     t0 = time.time()
     paths = []
