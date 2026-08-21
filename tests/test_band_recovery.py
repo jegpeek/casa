@@ -52,6 +52,19 @@ def _synth_s2(s2_real, truth=TRUTH):
     return out
 
 
+def have_bulk_data(root=None):
+    """True when the input arrays are present -- tier B in REPRODUCING.md.
+
+    A clone carries the fit OUTPUTS, not the input arrays, so the tests that
+    re-fit real windows cannot run from a bare checkout.  Returning False lets
+    them report a skip; a bare FileNotFoundError reads like a broken repo and
+    would send a new user hunting for a bug that isn't there.
+    """
+    d = os.path.join(root or _ROOT, 'data')
+    return all(os.path.exists(os.path.join(d, f)) for f in
+               ('resampled_epochs_noclip.npy', 'U_grid.npy', 'V_grid.npy'))
+
+
 def band_recovery(row=3200, col=2400, stride=2, band_dex=BAND_DEX):
     # NB sf.read_window signature is (row0, col0, nrows, ncols) -- row FIRST.
     data = sf.read_window(row, col, 400, 400, data_dir=os.path.join(_ROOT, 'data'),
@@ -88,6 +101,9 @@ def triaxiality_from_ratios(a2a1, a3a2):
 
 
 def test_bands_recover_injected_ratios():
+    if not have_bulk_data():
+        print('SKIP test_bands_recover_injected_ratios: input arrays absent')
+        return
     rows, t_true = band_recovery()
     good = [r for r in rows if r['ok']]
     assert len(good) >= 4, f'too few bands converged: {len(good)} of {len(rows)}'
