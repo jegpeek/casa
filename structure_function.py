@@ -34,7 +34,16 @@ import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import matplotlib.patches as mpatches
-import util_efs
+
+# util_efs is an external personal utility library, not part of this repo, and
+# the only thing used from it is scatterplot() inside one plotting helper
+# (plot_s2_scatter).  A hard import made a fresh clone unimportable -- every
+# analysis script failed at import time over a plot nobody had called.  Import
+# it softly and fail only at the point of use.
+try:
+    import util_efs
+except ImportError:                                          # pragma: no cover
+    util_efs = None
 
 LY_PER_PC = 3.2616          # light-years per parsec
 ARCSINH_SCALE = 0.03        # default arcsinh / background noise scale [flux units]
@@ -1605,6 +1614,12 @@ def plot_s2_1d(sf, fit=None, ellipsoidal=False, ax=None, **scatter_kwargs):
         plt.sca(ax)
 
     kw = scatter_kwargs.copy()
+
+    if util_efs is None:
+        raise ImportError(
+            'plot_s2_scatter needs the external util_efs library, which is not '
+            'part of this repo. Put util_efs on PYTHONPATH, or use the '
+            'analysis/ figure scripts, which do not depend on it.')
 
     util_efs.scatterplot(x_data, y_data, nograyscale=True, **kw)
     xrange = plt.xlim()
