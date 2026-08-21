@@ -28,8 +28,23 @@ soft and everything in `analysis/` works without it.
 
 ## Tier A — reproduce the headline numbers
 
-Confirm the install by reproducing the common shape and its intrinsic scatter
-(report §1.3, §1.5):
+**Start here: `notebooks/topline_results.ipynb`.** It is a guided walkthrough of
+every claim in report §1, recomputing each one from the tracked tables and
+printing it beside the value the report asserts, with the reasoning for each
+sample cut and subset in prose. It is committed *with outputs*, so it can be read
+without running anything. Regenerate it with
+
+```bash
+python analysis/build_topline_notebook.py                       # rebuild cells
+python analysis/execute_notebook_inproc.py notebooks/topline_results.ipynb
+```
+
+The second script executes the notebook in-process rather than through a kernel,
+because some sandboxes forbid the local socket a Jupyter kernel binds. If
+`jupyter nbconvert --execute` works in your environment, it is equivalent.
+
+The rest of this section is the minimal spot-check if you would rather not run
+the notebook — the common shape and its intrinsic scatter (report §1.3, §1.5):
 
 ```python
 import numpy as np, pandas as pd
