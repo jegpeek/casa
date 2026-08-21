@@ -57,6 +57,10 @@ def shared_ratio_range(d, pad=0.06, floor=None):
     whose ratio falls below it, so callers must report the visible count
     rather than the fitted count -- see `n_visible`.
     """
+    # NOTE the span (and hence the padded upper bound) is computed from the
+    # data min, so callers MUST drop collapsed fits first -- see DEGEN in
+    # main().  A collapsed fit returns a ratio of ~1e-16, which makes the span
+    # ~16 dex and inflates the upper bound by nearly a decade.
     v = np.concatenate([d.a2a1.values, d.a3a2.values])
     v = v[np.isfinite(v) & (v > 0)]
     lo, hi = np.log10(v.min()), np.log10(v.max())
@@ -78,23 +82,25 @@ def n_visible(s, rng, cols):
     return int(m.sum())
 
 
-def ml_center_and_scatter(v, se, grid=np.linspace(0.0, 0.6, 601)):
+def ml_center_and_scatter(v, se, grid=None):
     """Max-likelihood common log10 value + intrinsic scatter, in dex.
 
     Returns (mu_dex, sig_int_dex, se_mu_dex, median_meas_se_dex).  The center is
     the likelihood-maximising one, which is what a hypothesis test on the shape
     plane requires -- testing against a non-minimizing center (e.g. the plain
     median) spuriously rejects a common shape.
+
+    Thin wrapper over shape_center.ml_center_and_scatter, which is the canonical
+    implementation; this module previously carried its own grid-search copy of
+    the same estimator, which is exactly how two answers to one question start
+    to diverge.  `grid` is accepted and ignored for backward compatibility.
     """
+    from shape_center import ml_center_and_scatter as _ml, weighted_center
+
     l, sl = np.log10(v), se / (v * np.log(10))
-    best = None
-    for s in grid:
-        w = 1.0 / (sl ** 2 + s ** 2)
-        mu = np.sum(w * l) / np.sum(w)
-        ll = -0.5 * np.sum(w * (l - mu) ** 2) + 0.5 * np.sum(np.log(w))
-        if best is None or ll > best[0]:
-            best = (ll, mu, s, 1.0 / np.sqrt(np.sum(w)))
-    return best[1], best[2], best[3], float(np.median(sl))
+    mu, sig = _ml(l, sl)
+    _, se_mu = weighted_center(l, sl, sig)
+    return mu, sig, se_mu, float(np.median(sl))
 
 
 def roll_band(a2a1, a3a2, inc_grid, n=4000, seed=31):
@@ -103,20 +109,15 @@ def roll_band(a2a1, a3a2, inc_grid, n=4000, seed=31):
     Both roll angles are marginalised uniformly; the band is therefore purely
     the roll-angle spread and carries NO measurement error and NO
     window-to-window shape variation.  theta/phi/psi are RADIANS.
+
+    Returns an (len(inc_grid), 3) array of [16, 50, 84] percentiles.  Delegates
+    to slicing_model.roll_band, which is the canonical implementation and is
+    pinned by tests/test_slicing_model.py.
     """
-    import structure_function as sf
-    rng = np.random.default_rng(seed)
-    phi, psi = rng.uniform(0, 2 * np.pi, n), rng.uniform(0, 2 * np.pi, n)
+    from slicing_model import roll_band as _rb
 
-    def one(inc_deg):
-        v = []
-        for f, s in zip(phi, psi):
-            ax2 = sf.principal_axes_2d(sf.params_from_principal_axes(
-                1.0, a2a1, a2a1 * a3a2, np.radians(inc_deg), f, s))
-            v.append(ax2['b2'] / ax2['b1'] if ax2['b1'] > 0 else np.nan)
-        return np.percentile(v, [16, 50, 84])
-
-    return np.array([one(t) for t in inc_grid])
+    lo, mid, hi = _rb(a2a1, a3a2, np.atleast_1d(inc_grid), n=n, seed=seed)
+    return np.column_stack([lo, mid, hi])
 
 
 def log_ellipse(cx, cy, rx, ry, n=241):
@@ -185,8 +186,28 @@ def fig_inclination(d, rng, shape=None, out='b2b1_vs_inclination_all115.png'):
     ax.set_yscale('log')
     ax.set_ylim(*rng)
     ax.set_xlim(0.0, 90.0)
-    ax.legend(frameon=False, fontsize=6.0, loc='lower left', handlelength=1.2)
-    fig.tight_layout()
+
+    # Legend goes ABOVE the axes: inside, it lands on the low-b2/b1 points at
+    # high inclination, which are exactly the ones the slicing curve is being
+    # judged against.  The band gets its own entry because its width is roll
+    # spread ONLY -- no measurement error -- and a reader will otherwise take it
+    # for a confidence band.
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+    from matplotlib.legend_handler import HandlerTuple
+
+    h, l = ax.get_legend_handles_labels()
+    if shape is not None:
+        h = list(h) + [(Line2D([], [], color=BLUE, lw=1.3),
+                        Patch(facecolor=BLUE, alpha=0.15, lw=0))]
+        l = list(l) + ['one fixed 3D shape ($a_2/a_1$=%.2f, $a_3/a_2$=%.2f):\n'
+                       'median and 16-84%% roll spread (no measurement error)'
+                       % (shape[0], shape[1])]
+    fig.set_size_inches(5.0, 4.6)
+    fig.legend(h, l, frameon=False, fontsize=6.0, ncol=2, loc='upper center',
+               bbox_to_anchor=(0.5, 1.0), handlelength=1.4, columnspacing=1.4,
+               handler_map={tuple: HandlerTuple(ndivide=None)})
+    fig.tight_layout(rect=(0, 0, 1, 0.88))
     fig.savefig(out, dpi=300)
     return fig, ax
 
@@ -204,14 +225,25 @@ def fig_shape_plane(d, rng, ell=None, out='shape_plane_all115.png'):
     construction.
     """
     import matplotlib.pyplot as plt
-    fig, ax = plt.subplots(figsize=(4.6, 4.6))
+    import matplotlib.lines as mlines
+    # Tall figure: the legend needs six entries with two-line captions, so it
+    # goes BELOW the axes rather than covering the low-ratio corner where the
+    # oblate outliers live.
+    fig, ax = plt.subplots(figsize=(6.2, 6.2))
     ax.plot(rng, rng, '-', color='0.55', lw=0.9, zorder=2)
+    ell_handles = []
     for cx, cy, rx, ry, st in (ell or []):
         ex, ey = log_ellipse(cx, cy, rx, ry)
         if st.get('fill'):
             ax.fill(ex, ey, color=st['color'], alpha=st['fill'], lw=0, zorder=1)
         ax.plot(ex, ey, st.get('ls', '-'), color=st['color'],
                 lw=st.get('lw', 1.2), zorder=st.get('z', 2))
+        if st.get('label'):
+            ell_handles.append(mlines.Line2D(
+                [], [], color=st['color'], ls=st.get('ls', '-'),
+                lw=st.get('lw', 1.2),
+                marker='D' if st.get('center_marker') else None,
+                ms=5.5, mew=0, label=st['label']))
     if ell:
         cx, cy = ell[0][0], ell[0][1]
         ax.plot([10 ** cx], [10 ** cy], 'D', color=BLUE, ms=5.5, mew=0,
@@ -243,6 +275,119 @@ def fig_shape_plane(d, rng, ell=None, out='shape_plane_all115.png'):
     ax.set_aspect('equal')
     ax.set_xlabel(r'$a_2/a_1$   (lag ratio at fixed $S_2$)')
     ax.set_ylabel(r'$a_3/a_2$   (lag ratio at fixed $S_2$)')
-    fig.tight_layout()
-    fig.savefig(out, dpi=300)
+
+    # Which side of the diagonal means what.  Placed inside the axes on the
+    # side each regime occupies, so the diagonal needs no separate legend key.
+    ax.text(0.04, 0.42, 'prolate\n' r'$a_3/a_2 > a_2/a_1$', transform=ax.transAxes,
+            ha='left', va='center', fontsize=8.5, color='0.35')
+    ax.text(0.96, 0.10, 'oblate\n' r'$a_3/a_2 < a_2/a_1$', transform=ax.transAxes,
+            ha='right', va='center', fontsize=8.5, color='0.35')
+
+    h, l = ax.get_legend_handles_labels()
+    fig.legend(h + ell_handles, l + [x.get_label() for x in ell_handles],
+               frameon=False, fontsize=8.0, loc='lower center',
+               bbox_to_anchor=(0.5, -0.005), handlelength=1.6,
+               labelspacing=0.9, borderaxespad=0.0)
+    fig.tight_layout(rect=(0, 0.26, 1, 1))
+    fig.savefig(out, dpi=300, bbox_inches='tight')
     return fig, ax
+
+# --- entry point --------------------------------------------------------------
+# Defaults reproduce the two committed deliverable figures exactly: k=4 table,
+# shared log ratio range with the hand-set 0.08 floor (below which a2/a1 and
+# a3/a2 are not trusted), and the ML common shape as the reference for the
+# slicing band.  NOTE the fits always use the FULL top-quartile sample; the
+# floor clips only what is DRAWN, and the legend counts follow the drawing.
+FLOOR = 0.08
+DEGEN = 0.02          # ratios below this are collapsed fits, not measurements
+
+
+def apply_figure_style(sizes=(8, 7, 6)):
+    """Publication text sizes: (axes title, axis label, tick/legend)."""
+    import matplotlib as mpl
+    mpl.rcParams.update({
+        'font.size': sizes[2],
+        'axes.titlesize': sizes[0],
+        'axes.labelsize': sizes[1],
+        'xtick.labelsize': sizes[2],
+        'ytick.labelsize': sizes[2],
+        'legend.fontsize': sizes[2],
+    })
+
+def main(k=K, floor=FLOOR, outdir=None):
+    import matplotlib
+    matplotlib.use('Agg')
+    outdir = outdir or os.path.join(ROOT, 'results', 'figures')
+    os.makedirs(outdir, exist_ok=True)
+
+    apply_figure_style()
+
+    d, _ = load(k=k)
+    d = d[usable(d)]
+
+    # Drop collapsed fits BEFORE ranging.  A degenerate fit returns a ratio of
+    # ~1e-16; it is off-scale on any sane axis, but if it reaches
+    # shared_ratio_range it sets the span and inflates the upper bound by
+    # nearly a decade.  This is the cut used for the published figures.
+    d = d[(d.a2a1 >= DEGEN) & (d.a3a2 >= DEGEN)].copy()
+
+    rng = shared_ratio_range(d, floor=floor)
+    q4 = d[d.tier == 'q4']
+    mu21, s21, _, me21 = ml_center_and_scatter(q4.a2a1.values, q4.se_a2a1.values)
+    mu32, s32, _, me32 = ml_center_and_scatter(q4.a3a2.values, q4.se_a3a2.values)
+    c21, c32 = 10 ** mu21, 10 ** mu32
+
+    # Three nested 1-sigma ellipses, all on the ML center.  Only the OUTER one
+    # (measurement + intrinsic in quadrature) is comparable with the plotted
+    # points; the other two are its components.  See fig_shape_plane's docstring
+    # and results/shape_ellipses_three_k4.csv, which tabulates the coverage of
+    # each against the 39.35% a 2D 1-sigma contour should hold.
+    # Coverage is measured on the SAME sample the ellipses are drawn over (the
+    # top quartile), so the legend reports the actual fraction inside rather
+    # than a remembered number.  A 2D 1-sigma contour should hold 39.35%.
+    EXPECTED = 39.35
+
+    def _inside(rx, ry):
+        dx = (np.log10(q4.a2a1.values) - mu21) / rx
+        dy = (np.log10(q4.a3a2.values) - mu32) / ry
+        return 100.0 * np.mean(dx ** 2 + dy ** 2 <= 1.0)
+
+    r21, r32 = np.hypot(me21, s21), np.hypot(me32, s32)
+    ells = [
+        (mu21, mu32, r21, r32,
+         dict(color=BLUE, lw=1.5, fill=0.10, z=3, center_marker=True,
+              label=('center, and measurement $\\oplus$ intrinsic\n'
+                     '(the only one comparable with the points: %.0f%% inside)'
+                     % _inside(r21, r32)))),
+        (mu21, mu32, me21, me32,
+         dict(color=BLUE, lw=1.5, ls='--', z=3,
+              label=('measurement only \u2014 the null of one exact shape\n'
+                     '(%.0f%% inside, %.0f%% expected: the null fails)'
+                     % (_inside(me21, me32), EXPECTED)))),
+        (mu21, mu32, s21, s32,
+         dict(color=BLUE, lw=1.8, ls=':', z=3,
+              label=('intrinsic only \u2014 spread of the TRUE shapes,\n'
+                     'not of the plotted points'))),
+    ]
+
+    f1 = os.path.join(outdir, 'b2b1_vs_inclination_all115.png')
+    f2 = os.path.join(outdir, 'shape_plane_all115.png')
+    fig_inclination(d, rng, shape=(c21, c32), out=f1)
+    fig_shape_plane(d, rng, ell=ells, out=f2)
+
+    print('k=%d  n_drawn=%d  range=[%.3f, %.3f]' % (k, len(d), rng[0], rng[1]))
+    print('common shape  a2/a1=%.4f  a3/a2=%.4f' % (c21, c32))
+    print('intrinsic sig %.3f, %.3f dex | median meas SE %.3f, %.3f dex'
+          % (s21, s32, me21, me32))
+    print('wrote %s\n      %s' % (f1, f2))
+    return f1, f2
+
+
+if __name__ == '__main__':
+    import argparse
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument('--k', type=int, default=K, help='jackknife blocking (4 = deliverable)')
+    ap.add_argument('--floor', type=float, default=FLOOR, help='lower ratio-axis floor')
+    ap.add_argument('--outdir', default=None)
+    a = ap.parse_args()
+    main(k=a.k, floor=a.floor, outdir=a.outdir)

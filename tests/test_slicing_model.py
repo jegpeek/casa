@@ -88,3 +88,33 @@ def test_median_curve_is_not_monotonic():
     _, med, _ = roll_band(A2A1, A3A2, grid, n=2000)
     d = np.diff(med)
     assert (d > 0).any() and (d < 0).any(), 'expected a non-monotonic median'
+    # Overall the curve still falls: the up-steps are a small real feature, not
+    # a rising trend.
+    assert med[-1] < med[0]
+
+
+def test_non_monotonicity_is_geometry_not_sampling():
+    """The up-steps must survive densifying the roll sampling.
+
+    roll_band shares roll draws across inclination (common random numbers), so
+    differences along the curve are geometric.  Independent draws per
+    inclination inject ~2e-3 of noise into each point -- two orders of
+    magnitude above the genuine ~2e-5 feature -- which would make the test
+    above pass on jitter alone.  Deterministic quadrature over both rolls
+    converges to a fixed up-step size, which is the evidence it is real.
+    """
+    grid = np.linspace(0, 90, 91)
+
+    def median_curve(m):
+        a = (np.arange(m) + 0.5) / m * 2 * np.pi
+        phi, psi = np.meshgrid(a, a, indexing='ij')
+        out = []
+        for th in grid:
+            v = np.array([slice_ratio_from(1.0, A2A1, A3A1, np.radians(th), f, s)
+                          for f, s in zip(phi.ravel(), psi.ravel())])
+            out.append(np.median(v[np.isfinite(v) & (v > 0)]))
+        return np.array(out)
+
+    up = [np.diff(median_curve(m)).max() for m in (60, 120)]
+    assert all(u > 5e-6 for u in up), up          # the feature is present
+    assert abs(up[1] - up[0]) < 0.2 * up[0], up   # and it has converged

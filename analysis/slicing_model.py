@@ -88,11 +88,26 @@ def roll_band(a2a1, a3a2, inc_grid, n=NROLL, seed=31):
     measurement error entirely, and any figure showing it must say so.
     Freezing both rolls collapses the width to exactly zero, which is the
     check that no other variance has leaked in.
+
+    The SAME roll draws are reused at every inclination (common random
+    numbers).  Drawing fresh rolls per inclination adds independent sampling
+    noise to each point on the curve, which at n=4000 is ~2e-3 in b2/b1 --
+    about a hundred times the genuine non-monotonic structure of ~2e-5 (see
+    test_median_curve_is_not_monotonic) -- so it both roughens the drawn curve
+    and buries the real feature in jitter.  Sharing the draws makes differences
+    ALONG the curve reflect geometry rather than resampling.
     """
     rng = np.random.default_rng(seed)
+    phi = rng.uniform(0, 2 * np.pi, n)
+    psi = rng.uniform(0, 2 * np.pi, n)
+
     lo, mid, hi = [], [], []
     for th in np.atleast_1d(inc_grid):
-        a, b, c = b2b1_at(th, a2a1, a3a2, n=n, rng=rng)
+        v = np.array([slice_ratio_from(1.0, a2a1, a2a1 * a3a2,
+                                       np.radians(th), f, s)
+                      for f, s in zip(phi, psi)])
+        v = v[np.isfinite(v) & (v > 0)]
+        a, b, c = np.percentile(v, [16, 50, 84])
         lo.append(a)
         mid.append(b)
         hi.append(c)
