@@ -56,6 +56,35 @@ class _Display:
         return mod
 
 
+def _exec_cell(source, ns, disp):
+    """exec a cell, then render a trailing bare expression the way Jupyter does.
+
+    A cell ending in `fig` displays that figure under a real kernel.  Plain
+    exec() discards the value, so without this the notebook silently loses the
+    figures whose cells end that way -- the failure mode is a missing image, not
+    an error, which is exactly the kind of thing that ships unnoticed.
+    """
+    import ast
+
+    tree = ast.parse(source)
+    tail = None
+    if tree.body and isinstance(tree.body[-1], ast.Expr):
+        tail = ast.Expression(tree.body.pop().value)
+    exec(compile(tree, '<cell>', 'exec'), ns)
+    if tail is None:
+        return
+    value = eval(compile(tail, '<cell>', 'eval'), ns)
+    if value is None:
+        return
+    fig = getattr(value, 'savefig', None)
+    if fig is not None:                      # a matplotlib Figure
+        buf = io.BytesIO()
+        value.savefig(buf, format='png', dpi=110, bbox_inches='tight')
+        disp.captured.append(('image/png',
+                              base64.b64encode(buf.getvalue()).decode(),
+                              None))
+
+
 def execute(path):
     nb = nbf.read(path, as_version=4)
     workdir = os.path.dirname(os.path.abspath(path))
@@ -81,7 +110,7 @@ def execute(path):
             try:
                 with contextlib.redirect_stdout(buf), \
                         contextlib.redirect_stderr(buf):
-                    exec(cell.source, ns)
+                    _exec_cell(cell.source, ns, disp)
             except Exception:
                 n_err += 1
                 outputs.append(nbf.v4.new_output(

@@ -33,21 +33,30 @@ def radial_profile(plane, weights, rpix, nbins_edges):
         return num / den
 
 
-def audit_file(path):
-    with h5py.File(path, 'r') as f:
-        row = int(f.attrs['row'])
-        col = int(f.attrs['col'])
-        cid = int(f.attrs['chunk_id'])
-        pairs = f['sf/epoch_pairs'][:]
-        same = np.flatnonzero(pairs[:, 0] == pairs[:, 1])
-        # Count-weighted mean over the same-epoch (dW=0) planes:
-        # s2 = dsq/N per plane, so sum(s2*N)/sum(N) = sum(dsq)/sum(N).
-        s2 = f['sf/s2'][same.min():same.max() + 1].astype(np.float64)
-        nc = f['sf/n_counts'][same.min():same.max() + 1].astype(np.float64)
-        mad = float(f['sf'].attrs['flux_mad_std'])
-        size_ly = float(f['sf'].attrs['size_ly'])
-        lag_du = f['sf/lag_du'][:]
+def audit_s2(s2d, row, col, size_ly=None, flux_mad_std=np.nan, chunk_id=-1):
+    """Audit an in-memory compute_s2() result, no HDF5 cache required.
 
+    `audit_file` below reads the same quantities out of a `data/sf_fits/*.h5`
+    cache of `compute_s2` outputs.  That cache is not part of the fork's tracked
+    data, so this entry point exists to let the SNR tiering be regenerated from
+    the raw arrays via read_window + compute_s2.  Verified to reproduce
+    `results/noise_audit_table.csv` to 5+ decimals on spot-checked windows.
+    """
+    pairs = np.asarray(s2d['epoch_pairs'])
+    same = np.flatnonzero(pairs[:, 0] == pairs[:, 1])
+    s2 = np.asarray(s2d['s2'][same.min():same.max() + 1], dtype=np.float64)
+    nc = np.asarray(s2d['n_counts'][same.min():same.max() + 1],
+                    dtype=np.float64)
+    lag_du = np.asarray(s2d['lag_du'])
+    return _audit_planes(s2, nc, lag_du, row, col, chunk_id, size_ly,
+                         flux_mad_std)
+
+
+def _audit_planes(s2, nc, lag_du, row, col, cid, size_ly, mad):
+    """Shared core: count-weighted dW=0 mean -> radial profile -> floor/plateau.
+
+    s2 = dsq/N per plane, so sum(s2*N)/sum(N) = sum(dsq)/sum(N).
+    """
     num = np.nansum(np.where(np.isfinite(s2), s2 * nc, 0.0), axis=0)
     den = np.nansum(np.where(np.isfinite(s2), nc, 0.0), axis=0)
     with np.errstate(invalid='ignore', divide='ignore'):
@@ -77,6 +86,52 @@ def audit_file(path):
                 s2_floor=floor, s2_plateau=plateau,
                 snr2=snr2, snr=np.sqrt(snr2) if snr2 > 0 else np.nan,
                 floor_frac=floor / plateau if plateau else np.nan)
+
+
+def audit_window(spec):
+    """Pool worker: audit one window from the raw arrays, with a JSON cache.
+
+    spec = (row, col, size, data_dir, cache_dir).  Module level and taking a
+    single picklable tuple because macOS multiprocessing uses `spawn`, which
+    re-imports the worker by qualified name -- a closure or a function defined
+    in a notebook cell cannot be dispatched to a Pool.
+    """
+    import json
+    import structure_function as sf
+    import scale_split as ss
+
+    row, col, size, data_dir, cache_dir = spec
+    cache = os.path.join(cache_dir, 'audit_r%d_c%d.json' % (row, col))
+    if os.path.exists(cache):
+        with open(cache) as fh:
+            return json.load(fh), 'cached'
+    data = sf.read_window(row, col, size, size, data_dir=data_dir,
+                          **ss.READ_KW)
+    rec = audit_s2(sf.compute_s2(data, **ss.COMPUTE_KW), row, col)
+    rec = {k: (float(v) if isinstance(v, (int, float, np.floating)) else v)
+           for k, v in rec.items()}
+    os.makedirs(cache_dir, exist_ok=True)
+    with open(cache, 'w') as fh:
+        json.dump(rec, fh)
+    return rec, 'computed'
+
+
+def audit_file(path):
+    with h5py.File(path, 'r') as f:
+        row = int(f.attrs['row'])
+        col = int(f.attrs['col'])
+        cid = int(f.attrs['chunk_id'])
+        pairs = f['sf/epoch_pairs'][:]
+        same = np.flatnonzero(pairs[:, 0] == pairs[:, 1])
+        # Count-weighted mean over the same-epoch (dW=0) planes:
+        # s2 = dsq/N per plane, so sum(s2*N)/sum(N) = sum(dsq)/sum(N).
+        s2 = f['sf/s2'][same.min():same.max() + 1].astype(np.float64)
+        nc = f['sf/n_counts'][same.min():same.max() + 1].astype(np.float64)
+        mad = float(f['sf'].attrs['flux_mad_std'])
+        size_ly = float(f['sf'].attrs['size_ly'])
+        lag_du = f['sf/lag_du'][:]
+
+    return _audit_planes(s2, nc, lag_du, row, col, cid, size_ly, mad)
 
 
 if __name__ == '__main__':

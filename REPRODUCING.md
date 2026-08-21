@@ -94,6 +94,23 @@ Bulk arrays are symlinked into `data/` from outside the repo (see
 
 `data/chunk_windows.csv` is tracked (it is upstream's 115-window map).
 
+**Start here: `notebooks/run_analysis.ipynb`.** It runs the pipeline end to end
+— one window in detail, then the noise audit, the single-band fits at both
+blockings, the figures, and (optionally) the scale profile — and diffs every
+table it computes against the tracked one. Everything it writes goes under
+`rerun/`, so the published tables are never touched and the comparison stays
+meaningful. Cost is gated by `RUN_LEVEL`, measured cold on 12 cores with
+`PROCS=6`: `'walkthrough'` ≈ 4 min, `'figures'` ≈ 30 min (the default),
+`'full'` ≈ 60 min. Per-window results are cached as JSON under `rerun/data/`,
+so a second run is ~4 min and an interrupted run resumes where it stopped.
+
+```bash
+python analysis/build_pipeline_notebook.py
+python analysis/execute_notebook_inproc.py notebooks/run_analysis.ipynb
+```
+
+The equivalent as bare commands:
+
 ```bash
 python analysis/noise_audit.py                       # SNR tiers -- run first
 python analysis/singleband_powerlaw.py --k 4         # the deliverable fit table
@@ -103,6 +120,16 @@ python analysis/scale_profile_2d.py                  # in-plane twin
 
 Order matters: the SNR tiering in every figure comes from
 `results/noise_audit_table.csv`, so `noise_audit.py` runs first.
+
+**Caveat on that first command.** `noise_audit.py`'s `__main__` reads a
+`data/sf_fits/*.h5` cache of `compute_s2` outputs, which is *not* part of this
+fork's tracked or symlinked data — so as written it finds zero files and exits.
+The audit needs nothing that `compute_s2` does not already return, so
+`noise_audit.audit_s2(s2, row, col)` computes it in memory straight from the raw
+arrays; it reproduces `results/noise_audit_table.csv` to five decimals on
+spot-checked windows, and identical SNR tier assignments for all 115. The
+notebook uses that path. Both entry points share one core (`_audit_planes`) so
+they cannot drift.
 
 **`--k` is the jackknife blocking and it is not cosmetic.** `k=2` does not
 converge; `k=3` and `k=4` agree to about 1% on the axis ratios. `k=4` is the
