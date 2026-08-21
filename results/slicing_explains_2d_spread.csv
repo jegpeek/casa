@@ -1,0 +1,4 @@
+quantity,sd_dex,lo68,hi68,source,P_pred_ge_obs
+2D b2/b1 observed intrinsic,0.185,0.155,0.223,"ML fit, measurement removed",
+predicted: slicing one fixed 3D shape,0.17219661128833635,0.15690639562143388,0.189127178741639,"MC, a2a1=0.285 a3a2=0.601 at 29 observed inclinations, theta in RADIANS, roll uniform",0.2475
+predicted: slicing + fitted 3D sig_int,0.19181500470741364,0.17042034386413718,0.2149731322575802,same + sig_int 0.120/0.096 dex on the 3D ratios,0.61

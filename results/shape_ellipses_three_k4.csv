@@ -1,0 +1,4 @@
+ellipse,center_a2a1,center_a3a2,semiaxis_a2a1_dex,semiaxis_a3a2_dex,frac_q4_inside,expected_frac,comparable_with_points
+measurement (+) intrinsic,0.2811328906542944,0.5958212139157549,0.27848375885923443,0.12406334552225,0.4827586206896552,0.3935,YES - the only ellipse comparable with the plotted points
+measurement only (null: one exact shape),0.2811328906542944,0.5958212139157549,0.24783906864812139,0.07342828952231684,0.1724137931034483,0.3935,"no - nested component; under-covers, which is the null failing"
+intrinsic only (spread of TRUE shapes),0.2811328906542944,0.5958212139157549,0.127,0.1,0.20689655172413793,0.3935,"no - describes true shapes, not the plotted quantities"

@@ -1,0 +1,2 @@
+quantity,common_value,se,sigma_from_diagonal,sig_int_dex,sig_int_lo,sig_int_hi,n_prolate_side,n_total,n_prolate_gt1sig,n_oblate_gt1sig,common_shape_axes,triaxiality_T,sigma_from_pure_prolate,sigma_from_pure_oblate,snr_range
+log10(a3/a2) - log10(a2/a1)  (prolateness),0.34968533147582875,0.05055181366580579,6.917364702037635,0.16111647692221306,0.11514630336057519,0.21379620895022325,25,29,20,3,1 : 0.285 : 0.171,0.946374627571883,8.943433017472254,13.893274278447793,"4.03-6.96 (top SNR quartile, q4)"

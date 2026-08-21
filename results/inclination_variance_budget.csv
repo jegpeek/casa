@@ -1,0 +1,4 @@
+figure,source,median_dex,pct_variance,in_shaded_region
+b2b1_vs_inclination_log,"roll angles (uniform phi,psi)",0.1676860067482748,57.08283469536184,True
+b2b1_vs_inclination_log,x-error via curve slope,0.03583081787223288,3.9438465094872823,False
+b2b1_vs_inclination_log,y measurement error (raw jackknife SE),0.10113900770416842,25.199175199989277,False

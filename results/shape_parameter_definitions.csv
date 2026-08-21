@@ -1,0 +1,5 @@
+quantity,definition,alpha_dependent,note
+a2/a1,"ratio of ellipsoidal lag lengths at fixed S2, along principal axes 2 and 1",no,r = |M^-1 dx| equals s/a_i exactly along axis i (verified to 4e-16)
+a3/a2,"ratio of ellipsoidal lag lengths at fixed S2, along principal axes 3 and 2",no,same
+b2/b1,in-plane (dW=0 slice) lag ratio at fixed S2,no,"central slice of the ellipsoid, not a projection"
+amplitude contrast (S2 ratio at fixed lag),(a1/a2)^alpha,yes,alpha-weighted alternative; reorders 13% of window pairs vs the lag ratio

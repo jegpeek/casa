@@ -1,0 +1,4 @@
+definition,a2a1,a3a2,note,K
+median (used by BOTH figures),0.2595177488516153,0.5728594992596167,"unbiased; predicts inclination data best (chi2 30.4/29, p=0.394)",3
+ML common value + intrinsic scatter,0.2853998756693512,0.6008325634880871,chi2 44.4/29 p=0.034 against inclination data; used for the scatter estimate only,3
+chi2-minimising (hypothesis test only),0.28068439595331895,0.6035682210518576,testing a common value against a non-minimising centre would spuriously reject,3

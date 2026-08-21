@@ -1,0 +1,5 @@
+component,value,pct_of_observed
+observed var(b2/b1) [2D],0.033334608532637186,100.0
+slicing one fixed 3D shape,0.025780972681083127,77.33995932738054
+measurement noise,0.009244726628933041,27.73311892918056
+residual for true shape variation,0.0,0.0
