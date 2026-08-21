@@ -322,17 +322,23 @@ def main(k=K, floor=FLOOR, outdir=None):
 
     apply_figure_style()
 
-    d, _ = load(k=k)
-    d = d[usable(d)]
+    d_all = d = load(k=k)[0]
+    d_all = d = d_all[usable(d_all)]
 
-    # Drop collapsed fits BEFORE ranging.  A degenerate fit returns a ratio of
-    # ~1e-16; it is off-scale on any sane axis, but if it reaches
-    # shared_ratio_range it sets the span and inflates the upper bound by
-    # nearly a decade.  This is the cut used for the published figures.
-    d = d[(d.a2a1 >= DEGEN) & (d.a3a2 >= DEGEN)].copy()
+    # STANDING RULE for this project: clipping affects only what is DRAWN.  The
+    # ML fits always use the full usable top-quartile sample, so the published
+    # numbers do not move when a display threshold is retuned.
+    #
+    # `d` (drawn) drops collapsed fits; a degenerate fit returns a ratio of
+    # ~1e-16, off-scale on any sane axis, and because shared_ratio_range takes
+    # its span from the data min, letting one through inflates the padded upper
+    # bound from 1.14 to 8.3.  `d_all` (fitted) keeps them: their large SEs give
+    # them almost no weight in the likelihood, and dropping them would be a cut
+    # on the fitted value itself.
+    d = d_all[(d_all.a2a1 >= DEGEN) & (d_all.a3a2 >= DEGEN)].copy()
 
     rng = shared_ratio_range(d, floor=floor)
-    q4 = d[d.tier == 'q4']
+    q4 = d_all[d_all.tier == 'q4']
     mu21, s21, _, me21 = ml_center_and_scatter(q4.a2a1.values, q4.se_a2a1.values)
     mu32, s32, _, me32 = ml_center_and_scatter(q4.a3a2.values, q4.se_a3a2.values)
     c21, c32 = 10 ** mu21, 10 ** mu32
@@ -347,9 +353,13 @@ def main(k=K, floor=FLOOR, outdir=None):
     # than a remembered number.  A 2D 1-sigma contour should hold 39.35%.
     EXPECTED = 39.35
 
+    # Coverage is a statement about the points a reader can SEE inside the
+    # ellipse, so it is measured on the drawn top quartile, not the fitted one.
+    q4_drawn = d[d.tier == 'q4']
+
     def _inside(rx, ry):
-        dx = (np.log10(q4.a2a1.values) - mu21) / rx
-        dy = (np.log10(q4.a3a2.values) - mu32) / ry
+        dx = (np.log10(q4_drawn.a2a1.values) - mu21) / rx
+        dy = (np.log10(q4_drawn.a3a2.values) - mu32) / ry
         return 100.0 * np.mean(dx ** 2 + dy ** 2 <= 1.0)
 
     r21, r32 = np.hypot(me21, s21), np.hypot(me32, s32)

@@ -94,6 +94,28 @@ converge; `k=3` and `k=4` agree to about 1% on the axis ratios. `k=4` is the
 deliverable. A run at a different `k` writes a differently suffixed table and
 will not overwrite the published one.
 
+**Which `k` goes with which number.** The tier-A check above reads the `k=3`
+table because that is the one the report tabulates and asserts (0.2854, 0.6008).
+`make_tier_figures.py` defaults to `k=4`, so it prints 0.2811 / 0.5958 — the same
+result at the other converged blocking, not a failed reproduction. Pass `--k 3`
+to reproduce the report's tabulated values exactly:
+
+```bash
+python analysis/make_tier_figures.py --k 3   # -> 0.2854 / 0.6008
+python analysis/make_tier_figures.py         # -> 0.2811 / 0.5958  (k=4 default)
+```
+
+The 1.5% spread between them is the blocking systematic, and it is smaller than
+the 0.12 dex intrinsic scatter that is the actual result. Both are correct; only
+quote one, and say which.
+
+**Display clipping never moves a fitted number.** The figures drop collapsed
+fits (ratios of ~1e-16) before ranging and drawing, because one of them would
+inflate the padded upper axis bound from 1.14 to 8.3. The ML fits deliberately
+keep them: their standard errors are enormous, so they carry almost no weight,
+and cutting on the fitted value itself would bias the center. If you retune the
+display floor, the printed common shape must not change — that is the check.
+
 ## Tests
 
 ```bash
