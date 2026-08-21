@@ -10,3 +10,5 @@ __pycache__/
 handoff/
 chunk_fits.pdf
 chunk_summary.npy
+.DS_Store
+_view_*.png
