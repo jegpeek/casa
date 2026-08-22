@@ -116,7 +116,7 @@ ROOT = os.path.dirname(os.getcwd()) if os.path.basename(os.getcwd()) == \
 sys.path[:0] = [ROOT, os.path.join(ROOT, 'analysis')]
 
 # ---- knobs ---------------------------------------------------------------
-RUN_LEVEL = 'figures'   # 'walkthrough' | 'figures' | 'full'
+RUN_LEVEL = 'full'      # 'walkthrough' | 'figures' | 'full'
 PROCS = 6               # worker processes for the window pools
 STRIDE = 2              # lag-grid decimation used by every published fit
 RCUT = 0.1              # single-band fit radius, light years
@@ -798,6 +798,106 @@ else:
                 print('  %2d/%d %s %.0fs' % (i, len(sp_specs), how,
                                              time.time() - t0), flush=True)
     print('scale profile done in %.1f min' % ((time.time() - t0) / 60))
+""")
+
+md(r"""
+Now aggregate those per-window fits and compare against the tracked table. The
+aggregation is a median with a Wilcoxon signed-rank test rather than an
+inverse-variance weighted mean: the slopes have heavy tails and one
+badly-determined window would otherwise dominate.
+
+Note the sample is 27 windows, not 29. Two windows have fewer than three
+usable bands — the widest bands run into the window size — and a slope needs
+three points, so they drop out. That is a property of the data, not a filter
+applied by hand.
+""")
+
+code(r"""
+import summarize_scale_slopes as sss
+
+if LEVEL < 2:
+    print("RUN_LEVEL='%s' -> nothing recomputed to compare." % RUN_LEVEL)
+else:
+    band_rows, slope_rows = ssp.summarize(stride=STRIDE, band_dex=0.6,
+                                          data_dir=os.path.join(RERUN, 'data'))
+    bands_re = pd.DataFrame(band_rows)
+    bands_re.to_csv(os.path.join(RERUN, 'results',
+                                 'scale_profile_d0.6_s2_bands.csv'), index=False)
+    pd.DataFrame(slope_rows).to_csv(
+        os.path.join(RERUN, 'results', 'scale_profile_d0.6_s2_slopes.csv'),
+        index=False)
+
+    got = sss.summarize(bands_re)
+    got.to_csv(os.path.join(RERUN, 'results',
+                            'scale_profile_slopes_summary.csv'), index=False)
+    want = pd.read_csv(os.path.join(ROOT, 'results',
+                                    'scale_profile_slopes_summary.csv'))
+    m = want.merge(got, on=['measure', 'subset'], suffixes=('_w', '_g'))
+    print('%-22s %-18s %10s %10s %12s %12s'
+          % ('measure', 'subset', 'tracked', 'rerun', 'p tracked', 'p rerun'))
+    for _, r in m.iterrows():
+        print('%-22s %-18s %+10.4f %+10.4f %12.2e %12.2e'
+              % (r['measure'], r['subset'], r['slope_per_dex_w'],
+                 r['slope_per_dex_g'], r['wilcoxon_p_w'], r['wilcoxon_p_g']))
+    print()
+    print('max |diff| in slope_per_dex : %.3e'
+          % np.abs(m.slope_per_dex_w - m.slope_per_dex_g).max())
+    print('windows used                : %s (tracked %s)'
+          % (sorted(set(got.n_windows)), sorted(set(want.n_windows))))
+
+    # Where the residual difference lives: per band, usable vs not.
+    bw = pd.read_csv(os.path.join(ROOT, 'results',
+                                  'scale_profile_d0.6_s2_bands.csv'))
+    mb = bw.merge(bands_re, on=['chunk', 'band'], suffixes=('_w', '_g'))
+    rel = (np.abs(mb.a2a1_w - mb.a2a1_g) / np.abs(mb.a2a1_w)).values
+    ok = mb.usable_w.values.astype(bool)
+    print()
+    print('per-band relative |diff| in a2a1 (%d bands):' % len(mb))
+    print('   median        %.1e' % np.nanmedian(rel))
+    print('   max, usable   %.1e   (%d bands)' % (np.nanmax(rel[ok]), ok.sum()))
+    print('   max, unusable %.1e   (%d bands, collapsed fits on a boundary)'
+          % (np.nanmax(rel[~ok]), (~ok).sum()))
+    print('   usable flag disagreements: %d'
+          % int((mb.usable_w.astype(bool) != mb.usable_g.astype(bool)).sum()))
+""")
+
+md(r"""
+Unlike §3, this does **not** come out bit-identical, and it is worth being
+precise about why rather than waving at "numerical noise".
+
+The per-band fits agree to a median relative difference of ~10⁻⁸, and every
+band that differs by more than 10⁻³ is one already flagged unusable — a
+collapsed fit sitting on a parameter boundary, where the objective is flat and
+the optimizer's stopping point is not well determined. No usable band differs
+by more than ~10⁻⁴, `usable` is assigned identically for all 145 bands, and
+the aggregated slopes therefore agree to ~10⁻⁵.
+
+Re-running a single window twice in *this* environment reproduces bit-for-bit,
+so the fits are deterministic; there is no random start. The differences are
+against a table generated on a different day. That reading is supported by
+which tables reproduce exactly: `singleband_powerlaw_r0.1_s2_k3.csv` was
+regenerated most recently and is bit-identical, while `noise_audit_table.csv`
+and the scale-profile tables are older and agree to floating-point tolerance
+instead. Bit-identity across environments is not something this pipeline
+promises — agreement far inside the error bars is, and 10⁻⁵ against a quoted
+slope of −0.24 ± 0.04 is four orders of magnitude inside it.
+""")
+
+code(r"""
+import make_scale_profile_figure as mspf
+
+if LEVEL >= 2:
+    fig = mspf.make(bands_re, got,
+                    os.path.join(RERUN, 'results', 'scale_profile_ratios.png'))
+fig
+""")
+
+md(r"""
+The headline of this section is the pair of rows for `a3/a2` and `a2/a1`: the
+short axis shrinks relative to the middle one at roughly −0.24 per dex of lag,
+while the long-to-middle ratio is flat. Structures get *flatter* with scale
+without getting less elongated — which is why "prolate becomes triaxial" is a
+misleading way to say it.
 """)
 
 # ----------------------------------------------------------- 7. wrap up

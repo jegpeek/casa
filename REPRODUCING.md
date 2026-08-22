@@ -116,10 +116,30 @@ python analysis/noise_audit.py                       # SNR tiers -- run first
 python analysis/singleband_powerlaw.py --k 4         # the deliverable fit table
 python analysis/scale_profile.py                     # 3D scale profile
 python analysis/scale_profile_2d.py                  # in-plane twin
+python analysis/summarize_scale_profile.py           # -> *_bands.csv, *_slopes.csv
+python analysis/summarize_scale_slopes.py            # -> *_slopes_summary.csv
 ```
 
 Order matters: the SNR tiering in every figure comes from
 `results/noise_audit_table.csv`, so `noise_audit.py` runs first.
+
+**On that last command.** `results/scale_profile_slopes_summary.csv` — the
+report's §1.8 table — had no producing script in this repo; the aggregation
+recipe existed only in prose. `summarize_scale_slopes.py` recovers it (median
+of the per-window slopes with a Wilcoxon signed-rank test, not an
+inverse-variance weighted mean, because the slopes have heavy tails).
+`--check` verifies it against the tracked file rather than overwriting:
+
+```bash
+python analysis/summarize_scale_slopes.py --check
+```
+
+The median, p-value and window counts reproduce exactly. The bootstrap CI
+endpoints do not, and cannot: with 27 windows the resample median only takes
+values from the observed slopes, so the 16th/84th percentiles are pinned to
+order statistics and shift by one step with the RNG seed no matter how many
+draws you take. `--check` allows exactly that one step. The published interval
+is good to that resolution, not to the last digit.
 
 **Caveat on that first command.** `noise_audit.py`'s `__main__` reads a
 `data/sf_fits/*.h5` cache of `compute_s2` outputs, which is *not* part of this

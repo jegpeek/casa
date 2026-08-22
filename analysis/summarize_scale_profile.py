@@ -87,9 +87,19 @@ def _jk_se(values):
     return float(np.sqrt((n - 1) / n * np.sum((v - v.mean()) ** 2)))
 
 
-def summarize(stride=2, band_dex=0.6):
-    pat = f'{_ROOT}/data/scale_profile_d{band_dex:g}_s{stride}/*.json'
+def summarize(stride=2, band_dex=0.6, data_dir=None):
+    """Aggregate the per-window scale-profile JSON into band and slope rows.
+
+    data_dir defaults to the repo's own data/ tree; pass one to summarize a
+    rerun written elsewhere (the reproduction notebook points it at rerun/).
+    """
+    if data_dir is None:
+        data_dir = os.path.join(_ROOT, 'data')
+    pat = os.path.join(data_dir, f'scale_profile_d{band_dex:g}_s{stride}',
+                       '*.json')
     files = sorted(glob.glob(pat))
+    if not files:
+        raise FileNotFoundError('no scale-profile JSON under %s' % pat)
     # global smallest sampled lag radius: the resolution limit for any axis
     r_min_global = min(json.load(open(f))['bands'][0]['r_lo'] for f in files)
     band_rows, slope_rows = [], []
