@@ -116,14 +116,22 @@ def band_edges(radii, band_dex):
     return out
 
 
-def _fit_profile(data, edges, stride, r_grid=None):
-    """Fit every band on one image realisation.  Returns list of per-band dicts."""
+def _fit_profile(data, edges, stride, r_grid=None, profile='weibull'):
+    """Fit every band on one image realisation.  Returns list of per-band dicts.
+
+    `profile` selects the 1D form fit inside each band (see
+    scale_split.BAND_PROFILES).  'weibull' is the historical default; note that
+    within a single 0.6-dex band the Weibull's saturation scale is never
+    sampled (a1 exceeds the band's own outer radius in >99% of fits), so its
+    beta pins to a bound in ~63% of bands.  'powerlaw' fits the small-r limit
+    the Weibull is reducing to anyway, with one free profile parameter.
+    """
     s2 = sf.compute_s2(data, **ss.COMPUTE_KW)
     if r_grid is None:
         r_grid = ss._lag_radius_grid(s2)
     rows = []
     for lo, hi in edges:
-        rec = ss._fit_one(ss._banded(s2, r_grid, lo, hi), stride)
+        rec = ss._fit_one(ss._banded(s2, r_grid, lo, hi), stride, profile=profile)
         if 'error' not in rec and rec.get('fit_success'):
             a1, a2, a3 = rec['a1'], rec['a2'], rec['a3']
             rec['a2a1'] = a2 / a1
@@ -151,7 +159,7 @@ def _slope(rows, key):
 
 
 def _one_window(spec):
-    row, col, size, stride, out_dir, band_dex = spec
+    row, col, size, stride, out_dir, band_dex, profile = spec
     path = os.path.join(out_dir, f'sp_r{row}_c{col}_s{size}.json')
     if os.path.exists(path):
         return path, 'cached'
@@ -164,16 +172,17 @@ def _one_window(spec):
     edges = band_edges(radii, band_dex)
     del s2_full
 
-    central, r_grid = _fit_profile(data, edges, stride)
+    central, r_grid = _fit_profile(data, edges, stride, profile=profile)
     samples = []
     for i in range(K):
         for j in range(K):
             d2 = ss._delete_block(data, i, j, K)
-            rows, _ = _fit_profile(d2, edges, stride, r_grid=r_grid)
+            rows, _ = _fit_profile(d2, edges, stride, r_grid=r_grid,
+                                   profile=profile)
             samples.append(dict(block=[i, j], bands=rows))
 
     out = dict(row=row, col=col, size=size, k=K, fit_stride=stride,
-               profile='weibull', method='scale_profile', band_dex=band_dex,
+               profile=profile, method='scale_profile', band_dex=band_dex,
                n_bands=len(edges), bands=central, samples=samples,
                slopes={k: dict(zip(('slope', 'intercept', 'n'), _slope(central, k)))
                        for k in ('T', 'p', 'a2a1', 'a3a2', 'a3a1', 'alpha')},
@@ -191,15 +200,22 @@ def main():
     stride = int(sys.argv[2]) if len(sys.argv) > 2 else 2
     which = sys.argv[3] if len(sys.argv) > 3 else 'q4'
     band_dex = float(sys.argv[4]) if len(sys.argv) > 4 else BAND_DEX
+    profile = sys.argv[5] if len(sys.argv) > 5 else 'weibull'
+    if profile not in ss.BAND_PROFILES:
+        raise SystemExit('profile must be one of %s' % sorted(ss.BAND_PROFILES))
 
     wl = json.load(open(f'{_ROOT}/handoff/{which}_windows.json'))
     specs_raw = wl['specs'] if isinstance(wl, dict) else wl
-    out_dir = f'{_ROOT}/data/scale_profile_d{band_dex:g}_s{stride}'
+    # The default output tree keeps its historical name so existing caches and
+    # the tracked result CSVs stay valid; a non-default profile gets a suffix.
+    suffix = '' if profile == 'weibull' else f'_{profile}'
+    out_dir = f'{_ROOT}/data/scale_profile_d{band_dex:g}_s{stride}{suffix}'
     os.makedirs(out_dir, exist_ok=True)
-    specs = [(int(r), int(c), int(s), stride, out_dir, band_dex) for r, c, s in specs_raw]
+    specs = [(int(r), int(c), int(s), stride, out_dir, band_dex, profile)
+             for r, c, s in specs_raw]
 
     print(f'{len(specs)} windows, stride {stride}, band {band_dex} dex, '
-          f'{n_workers} workers -> {out_dir}', flush=True)
+          f'profile {profile}, {n_workers} workers -> {out_dir}', flush=True)
     with Pool(n_workers) as pool:
         for n, (path, how) in enumerate(pool.imap_unordered(_one_window, specs), 1):
             print(f'[{n}/{len(specs)}] {how} {os.path.basename(path)}', flush=True)

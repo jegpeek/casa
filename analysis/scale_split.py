@@ -103,9 +103,23 @@ def _banded(s2, r_grid, lo, hi):
     return out
 
 
-def _fit_one(s2_band, stride):
+#: Profiles usable for a single narrow band of lags.  'weibull' is the
+#: historical default (3 profile params: alpha, beta, var_inf); 'powerlaw' is
+#: the 2-parameter form, and MUST be fit with freeze=('A',) because
+#: A * r^alpha is invariant under r -> k r, an exact flat direction against the
+#: ellipsoid size (see power_law_log_s2's docstring).  Axis RATIOS -- the only
+#: thing the scale profile reads -- are unaffected by that degeneracy.
+BAND_PROFILES = {
+    'weibull':  dict(profile_fn='weibull_log_s2',  freeze=()),
+    'powerlaw': dict(profile_fn='power_law_log_s2', freeze=('A',)),
+}
+
+
+def _fit_one(s2_band, stride, profile='weibull'):
     try:
-        fit = sf.fit_s2(s2_band, profile=sf.weibull_log_s2,
+        spec = BAND_PROFILES[profile]
+        fit = sf.fit_s2(s2_band, profile=getattr(sf, spec['profile_fn']),
+                        freeze=spec['freeze'],
                         inner_uv_pixels=INNER_UV,
                         **dict(FIT_KW, fit_stride=stride))
         rec = sf._fit_scalars(fit['params'])

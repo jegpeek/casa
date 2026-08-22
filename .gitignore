@@ -31,3 +31,4 @@ notebooks/figures/
 
 # Output of notebooks/run_analysis.ipynb: a regenerable mirror of results/+data/.
 rerun/
+data/scale_profile_d0.6_s2_powerlaw/

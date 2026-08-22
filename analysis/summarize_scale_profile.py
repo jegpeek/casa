@@ -87,15 +87,19 @@ def _jk_se(values):
     return float(np.sqrt((n - 1) / n * np.sum((v - v.mean()) ** 2)))
 
 
-def summarize(stride=2, band_dex=0.6, data_dir=None):
+def summarize(stride=2, band_dex=0.6, data_dir=None, profile='weibull'):
     """Aggregate the per-window scale-profile JSON into band and slope rows.
 
     data_dir defaults to the repo's own data/ tree; pass one to summarize a
     rerun written elsewhere (the reproduction notebook points it at rerun/).
+    `profile` selects which per-band fit form to read; it must match the
+    directory suffix scale_profile.main writes ('' for the weibull default).
     """
     if data_dir is None:
         data_dir = os.path.join(_ROOT, 'data')
-    pat = os.path.join(data_dir, f'scale_profile_d{band_dex:g}_s{stride}',
+    suffix = '' if profile == 'weibull' else f'_{profile}'
+    pat = os.path.join(data_dir,
+                       f'scale_profile_d{band_dex:g}_s{stride}{suffix}',
                        '*.json')
     files = sorted(glob.glob(pat))
     if not files:
