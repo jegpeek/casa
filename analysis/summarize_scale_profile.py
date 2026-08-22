@@ -33,6 +33,8 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
 sys.path.insert(0, os.path.join(_ROOT, 'analysis'))
 
+import scale_split as ss  # noqa: E402  (needs the sys.path above)
+
 KEYS = ('T', 'p', 'a2a1', 'a3a2', 'a3a1', 'alpha')
 
 # Degeneracy rejection.  fit_success=True is NOT sufficient: the optimiser can
@@ -87,23 +89,37 @@ def _jk_se(values):
     return float(np.sqrt((n - 1) / n * np.sum((v - v.mean()) ** 2)))
 
 
-def summarize(stride=2, band_dex=0.6, data_dir=None, profile='weibull'):
+def summarize(stride=2, band_dex=0.6, data_dir=None,
+              profile=ss.CANONICAL_PROFILE):
     """Aggregate the per-window scale-profile JSON into band and slope rows.
 
     data_dir defaults to the repo's own data/ tree; pass one to summarize a
     rerun written elsewhere (the reproduction notebook points it at rerun/).
-    `profile` selects which per-band fit form to read; it must match the
-    directory suffix scale_profile.main writes ('' for the weibull default).
+    `profile` selects which per-band fit form to read, and resolves to the
+    directory suffix scale_profile.main writes (unsuffixed for the canonical
+    profile).  Every file read is checked against it.
     """
     if data_dir is None:
         data_dir = os.path.join(_ROOT, 'data')
-    suffix = '' if profile == 'weibull' else f'_{profile}'
+    suffix = ss.profile_suffix(profile)
     pat = os.path.join(data_dir,
                        f'scale_profile_d{band_dex:g}_s{stride}{suffix}',
                        '*.json')
     files = sorted(glob.glob(pat))
     if not files:
         raise FileNotFoundError('no scale-profile JSON under %s' % pat)
+    # A directory name is a claim; the per-file tag is the evidence.  Checking
+    # here means a mislabelled or hand-moved tree cannot reach a results table.
+    bad = {f: t for f, t in
+           ((f, json.load(open(f)).get('profile')) for f in files)
+           if t != profile}
+    if bad:
+        f0, t0 = sorted(bad.items())[0]
+        raise RuntimeError(
+            '%d of %d files under %s were fit with a different profile '
+            '(e.g. %s has profile=%r, expected %r)'
+            % (len(bad), len(files), os.path.dirname(pat),
+               os.path.basename(f0), t0, profile))
     # global smallest sampled lag radius: the resolution limit for any axis
     r_min_global = min(json.load(open(f))['bands'][0]['r_lo'] for f in files)
     band_rows, slope_rows = [], []
@@ -162,8 +178,9 @@ def _write(rows, path):
 def main():
     stride = int(sys.argv[1]) if len(sys.argv) > 1 else 2
     band_dex = float(sys.argv[2]) if len(sys.argv) > 2 else 0.6
-    band_rows, slope_rows = summarize(stride, band_dex)
-    tag = f'd{band_dex:g}_s{stride}'
+    profile = sys.argv[3] if len(sys.argv) > 3 else ss.CANONICAL_PROFILE
+    band_rows, slope_rows = summarize(stride, band_dex, profile=profile)
+    tag = f'd{band_dex:g}_s{stride}{ss.profile_suffix(profile)}'
     _write(band_rows, f'{_ROOT}/results/scale_profile_{tag}_bands.csv')
     _write(slope_rows, f'{_ROOT}/results/scale_profile_{tag}_slopes.csv')
 

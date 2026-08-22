@@ -444,8 +444,19 @@ the slopes have heavy tails and one badly-determined window would dominate a
 weighted mean. This matches `results/scale_profile_slopes_summary.csv`.
 
 The phrasing here needs care. "Prolate → triaxial with scale" wrongly implies the
-structures become *less elongated*. They do not: $a_2/a_1$ is scale-invariant.
-They get *flatter in the third dimension*, and the entire effect is in $a_3$.
+structures become *less elongated*. The flattening is the robust part and it is
+carried by $a_3$: $a_3/a_2$ falls −0.28/dex at $p = 4\times10^{-9}$.
+
+$a_2/a_1$ is the part to state carefully. Its slope over the full lag range is
+null ($-0.10$/dex, $p = 0.26$), but that is not the same as scale-invariance:
+it falls across the inner three bands and then the windows diverge, with 11 of
+22 rising and 11 falling beyond 0.08 ly. Drop the widest band alone and the
+slope is $-0.17$/dex at $p = 9\times10^{-4}$. The honest summary is that the
+data do not settle whether the elongation changes with scale.
+
+These numbers are the canonical power-law band fits. The Weibull was used
+historically and gives $a_3/a_2 = -0.24$/dex; see §1.8b for why its shape
+parameter is not identified inside a single 0.6-dex band.
 """)
 
 code(r"""
@@ -460,8 +471,9 @@ for c, lab in [('a3a2', 'a3/a2'), ('a3a1', 'a3/a1'), ('a2a1', 'a2/a1')]:
                      wilcoxon_p=stats.wilcoxon(v).pvalue))
 print(pd.DataFrame(rows).to_string(index=False))
 print()
-print('report: a3/a2 -0.24/dex p=7e-08 ; a3/a1 -0.083/dex p=1e-05 ;'
-      ' a2/a1 scale-invariant')
+print()
+print('Canonical (power-law) band fits. The historical Weibull run gave'
+      ' a3/a2 -0.24/dex p=7e-08.')
 """)
 
 code(r"""
@@ -484,8 +496,56 @@ for c, lab in [('a3a2', 'a3/a2'), ('a2a1', 'a2/a1')]:
               % (lab, tag, np.median(dd), (dd < 0).sum(), sub.sum(),
                  stats.wilcoxon(dd).pvalue))
 print()
-print('report (all-5-bands subset): dlog10(a3/a2) = -0.313, 22/23 neg, p=5e-07')
-print('                       vs   dlog10(a2/a1) = +0.013, p=0.71')
+print('Canonical (power-law) fits: dlog10(a3/a2) = -0.331, 22/22 neg, p=5e-07')
+print('                      vs    dlog10(a2/a1) = -0.107, 12/22 neg, p=0.12')
+print('Historical weibull run gave -0.313 (22/23, p=5e-07) and +0.013 (p=0.71).')
+""")
+
+# ----------------------------------------------------------------- 1.8b
+md(r"""
+## 1.8b Why the band fits use a power law, not the Weibull
+
+The band fits above use a simple power law inside each 0.6-dex band. That is a
+deliberate change from the historical run, and the reason is identifiability
+rather than fit quality.
+
+The Weibull profile, $S_2 = \mathrm{var}_\infty\,(1-e^{-r^\beta})^{\alpha/\beta}$,
+exists to describe the turnover from the power-law regime to saturation. Its
+turnover sits at lag $\approx a_1$. But the fitted $a_1$ *exceeds the outer
+radius of the band it was measured in* for 99.3% of band fits — so within one
+band the turnover is never sampled, and $\beta$ has nothing to constrain it. It
+pins to a bound in 63% of bands. Where it pins upward the Weibull is
+numerically the power law it reduces to; where it floats, the extra freedom is
+fitting noise. The power law is the honest parameter count for a narrow band.
+
+Two cautions. First, a bare power law $A r^\alpha$ is invariant under
+$r \to kr$ — an exact flat direction against the ellipsoid size — so it must be
+fit with the amplitude frozen; `scale_split.BAND_PROFILES` pairs each profile
+with the freeze its form requires so a caller cannot forget. Second, do not use
+an information criterion to choose here: the two forms differ by 0.27% in rms
+over ~73k highly correlated residuals per band, so AIC "prefers" the Weibull by
+an enormous margin on a difference carrying almost no independent information.
+
+The choice does not threaten the headline — $a_3/a_2$ falls under both, and
+slightly more steeply under the power law — but it does move $a_2/a_1$ band by
+band, which is why §1.8 states that result with the range dependence attached.
+`results/profile_comparison.png` shows both.
+""")
+
+code(r"""
+_pl = pd.read_csv(os.path.join(ROOT, 'results',
+                               'scale_profile_slopes_summary.csv'))
+_wb = pd.read_csv(os.path.join(ROOT, 'results',
+                               'scale_profile_weibull_slopes_summary.csv'))
+_m = _wb.merge(_pl, on=['measure', 'subset'], suffixes=('_weib', '_plaw'))
+_m = _m[_m.measure.isin(['a3/a2', 'a3/a1', 'a2/a1'])]
+print('%-8s %-18s %10s %10s %11s %11s'
+      % ('measure', 'subset', 'weibull', 'powerlaw', 'p weib', 'p plaw'))
+for _, r in _m.iterrows():
+    print('%-8s %-18s %+10.3f %+10.3f %11.1e %11.1e'
+          % (r['measure'], r['subset'], r['slope_per_dex_weib'],
+             r['slope_per_dex_plaw'], r['wilcoxon_p_weib'],
+             r['wilcoxon_p_plaw']))
 """)
 
 # ----------------------------------------------------------------- 1.9

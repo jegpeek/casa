@@ -103,19 +103,48 @@ def _banded(s2, r_grid, lo, hi):
     return out
 
 
-#: Profiles usable for a single narrow band of lags.  'weibull' is the
-#: historical default (3 profile params: alpha, beta, var_inf); 'powerlaw' is
-#: the 2-parameter form, and MUST be fit with freeze=('A',) because
-#: A * r^alpha is invariant under r -> k r, an exact flat direction against the
-#: ellipsoid size (see power_law_log_s2's docstring).  Axis RATIOS -- the only
-#: thing the scale profile reads -- are unaffected by that degeneracy.
+#: Profiles usable for a single narrow band of lags.
+#:
+#: 'powerlaw' is the DEFAULT and is what the paper reports.  Within one
+#: 0.6-dex band the Weibull's saturation scale is never sampled -- the fitted
+#: a1 exceeds the band's own outer radius in 99.3% of fits -- so its shape
+#: parameter beta has nothing to constrain it and pins to a bound in 63% of
+#: bands.  Where beta pins to its upper bound the Weibull is numerically the
+#: power law it reduces to; where beta floats, the extra freedom is fitting
+#: noise.  The power law is the honest parameter count for a narrow band.
+#:
+#: 'weibull' is retained because it is the historical default and the
+#: comparison figure needs it; it is the right choice over a WIDE lag range,
+#: where the turnover is actually sampled.
+#:
+#: 'powerlaw' MUST be fit with freeze=('A',): A * r^alpha is invariant under
+#: r -> k r, an exact flat direction against the ellipsoid size (see
+#: power_law_log_s2's docstring).  Axis RATIOS -- the only thing the scale
+#: profile reads -- are unaffected by that degeneracy.  Pairing each profile
+#: with its required freeze here means a caller cannot forget it.
 BAND_PROFILES = {
-    'weibull':  dict(profile_fn='weibull_log_s2',  freeze=()),
     'powerlaw': dict(profile_fn='power_law_log_s2', freeze=('A',)),
+    'weibull':  dict(profile_fn='weibull_log_s2',  freeze=()),
 }
 
+#: Profile whose fit outputs live in the UNSUFFIXED data/results tree.
+CANONICAL_PROFILE = 'powerlaw'
 
-def _fit_one(s2_band, stride, profile='weibull'):
+
+def profile_suffix(profile):
+    """Directory/filename suffix for a profile ('' for the canonical one).
+
+    Keyed on the profile NAME, not on which one is currently the default, so
+    that flipping CANONICAL_PROFILE can never silently reinterpret an existing
+    cache as having been fit with a different model.
+    """
+    if profile not in BAND_PROFILES:
+        raise KeyError('unknown profile %r; known: %s'
+                       % (profile, sorted(BAND_PROFILES)))
+    return '' if profile == CANONICAL_PROFILE else '_' + profile
+
+
+def _fit_one(s2_band, stride, profile=CANONICAL_PROFILE):
     try:
         spec = BAND_PROFILES[profile]
         fit = sf.fit_s2(s2_band, profile=getattr(sf, spec['profile_fn']),

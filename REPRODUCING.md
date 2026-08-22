@@ -120,6 +120,29 @@ python analysis/summarize_scale_profile.py           # -> *_bands.csv, *_slopes.
 python analysis/summarize_scale_slopes.py            # -> *_slopes_summary.csv
 ```
 
+### Which profile the band fits use
+
+The per-band ellipsoid fits use a simple **power law**
+(`scale_split.CANONICAL_PROFILE`), not the Weibull. Inside one 0.6-dex band the
+Weibull's turnover is never sampled — the fitted `a1` exceeds the band's own
+outer radius in 99.3% of fits — so its `beta` is unidentified and pins to a
+bound in 63% of bands. See report §1.8b, and `results/profile_comparison.png`.
+
+Both drivers take a fifth positional argument to select the profile:
+
+```bash
+python analysis/scale_profile.py 8 2 q4 0.6 weibull      # historical run
+python analysis/scale_profile_2d.py 8 2 q4 0.6 weibull   # its in-plane twin
+```
+
+The canonical profile writes the unsuffixed `data/scale_profile_d0.6_s2/`
+tree; any other writes a `_<profile>` suffix, so two profiles can never share
+a resumable cache. Every cached file records the profile it was fit with, and
+both the drivers and the summarizers refuse a file or a tree whose recorded
+profile does not match the one requested — a directory name is a claim, the
+per-file tag is the evidence. If you switch profiles and see such an error,
+rename the stale tree rather than deleting it; the fits are expensive.
+
 Order matters: the SNR tiering in every figure comes from
 `results/noise_audit_table.csv`, so `noise_audit.py` runs first.
 

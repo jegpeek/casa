@@ -9,7 +9,9 @@ data/jk_noise/
 data/jk_weibull_s2/
 data/bs_k3_B100_s2/
 data/scale_profile_d0.6_s2/
+data/scale_profile_d0.6_s2_weibull/
 data/scale_profile_2d_d0.6_s2/
+data/scale_profile_2d_d0.6_s2_weibull/
 data/scale_split_s2/
 data/scale_split_logmid_s2/
 data/singleband_*/
@@ -31,4 +33,3 @@ notebooks/figures/
 
 # Output of notebooks/run_analysis.ipynb: a regenerable mirror of results/+data/.
 rerun/
-data/scale_profile_d0.6_s2_powerlaw/

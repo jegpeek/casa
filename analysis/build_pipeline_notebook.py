@@ -767,10 +767,17 @@ Does the shape depend on the scale you measure it at? Fitting five overlapping
 the repo: one window takes ~6 min because each band is a separate fit with its
 own jackknife, so 29 windows is ~30 min on 6 workers.
 
-The result (report §1.8) is that structures flatten with scale, carried entirely
-by the short axis: a₃/a₂ falls −0.24/dex while a₂/a₁ is scale-invariant. This
-cell is gated because the conclusion is already in the tracked tables; set
-`RUN_LEVEL='full'` to regenerate it.
+The result (report §1.8) is that structures flatten with scale, carried by the
+short axis: a₃/a₂ falls −0.28/dex (p = 4×10⁻⁹). a₂/a₁ is null over the full
+range (−0.10/dex, p = 0.26) but not scale-invariant — it declines across the
+inner bands and then the windows diverge. This cell is gated because the
+conclusion is already in the tracked tables; set `RUN_LEVEL='full'` to
+regenerate it.
+
+The band fits use a simple power law, not the Weibull (report §1.8b): inside a
+0.6-dex band the Weibull's turnover is never sampled, so its β is unidentified
+and pins to a bound in 63% of bands. Pass `profile='weibull'` to reproduce the
+historical run; it writes a separate `_weibull` tree so the caches cannot mix.
 """)
 
 code(r"""
@@ -786,9 +793,16 @@ if LEVEL < 2:
                                  'scale_profile_slopes_summary.csv'))
     print(s.to_string(index=False))
 else:
-    sp_dir = os.path.join(RERUN, 'data', 'scale_profile_d0.6_s2')
+    # Route the rerun tree through the same helper the CLI uses, so the
+    # directory name always matches the profile actually being fit.
+    import scale_split as ss
+    SP_PROFILE = ss.CANONICAL_PROFILE
+    sp_dir = os.path.join(RERUN, 'data',
+                          'scale_profile_d0.6_s%d%s'
+                          % (STRIDE, ss.profile_suffix(SP_PROFILE)))
     os.makedirs(sp_dir, exist_ok=True)
-    sp_specs = [(r, c, 400, STRIDE, sp_dir, 0.6) for r, c in q4_specs]
+    sp_specs = [(r, c, 400, STRIDE, sp_dir, 0.6, SP_PROFILE)
+                for r, c in q4_specs]
     t0 = time.time()
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')

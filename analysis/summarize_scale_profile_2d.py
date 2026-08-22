@@ -68,14 +68,28 @@ def is_degenerate_2d(band, r_min_global):
     return False
 
 
-def _load(stride, band_dex, kind='2d'):
-    sub = ('scale_profile_2d_d%g_s%d' % (band_dex, stride) if kind == '2d'
-           else 'scale_profile_d%g_s%d' % (band_dex, stride))
-    return sorted(glob.glob(f'{_ROOT}/data/{sub}/*.json'))
+def _load(stride, band_dex, kind='2d', profile=None):
+    """Per-window JSON for one run.  The 2D and 3D trees must share a profile:
+    this module's whole purpose is a like-for-like comparison of the two."""
+    import scale_split as ss
+    if profile is None:
+        profile = ss.CANONICAL_PROFILE
+    suffix = ss.profile_suffix(profile)
+    sub = ('scale_profile_2d_d%g_s%d%s' % (band_dex, stride, suffix)
+           if kind == '2d'
+           else 'scale_profile_d%g_s%d%s' % (band_dex, stride, suffix))
+    files = sorted(glob.glob(f'{_ROOT}/data/{sub}/*.json'))
+    bad = [f for f in files if json.load(open(f)).get('profile') != profile]
+    if bad:
+        raise RuntimeError('%d of %d files under data/%s were not fit with '
+                           'profile %r (e.g. %s)'
+                           % (len(bad), len(files), sub, profile,
+                              os.path.basename(bad[0])))
+    return files
 
 
-def summarize(stride=2, band_dex=0.6):
-    files = _load(stride, band_dex, '2d')
+def summarize(stride=2, band_dex=0.6, profile=None):
+    files = _load(stride, band_dex, '2d', profile)
     if not files:
         raise SystemExit('no scale_profile_2d output found')
     r_min_global = min(json.load(open(f))['bands'][0]['r_lo'] for f in files)
@@ -118,7 +132,7 @@ def summarize(stride=2, band_dex=0.6):
     return band_rows, slope_rows
 
 
-def compare_to_3d(stride=2, band_dex=0.6):
+def compare_to_3d(stride=2, band_dex=0.6, profile=None):
     """Join the 2D measurement to the 3D fit's implied dW=0 slice, per band.
 
     The 3D run stores b1/b2/b2b1/pa2d for every band via sf._fit_scalars, so the
@@ -143,8 +157,10 @@ def compare_to_3d(stride=2, band_dex=0.6):
         r = ax['b2'] / ax['b1'] if ax['b1'] > 0 else np.nan
         return r, float(np.degrees(ax['pa'])), ax['b1']
 
-    f2 = _load(stride, band_dex, '2d')
-    f3 = _load(stride, band_dex, '3d')
+    # Both sides resolve through the same profile, so the comparison can never
+    # silently pit a 2D power-law fit against a 3D Weibull one.
+    f2 = _load(stride, band_dex, '2d', profile)
+    f3 = _load(stride, band_dex, '3d', profile)
     if not f3:
         print('no 3D run to compare against; skipping vs3d table')
         return []
@@ -187,14 +203,18 @@ def compare_to_3d(stride=2, band_dex=0.6):
 
 
 def main():
+    import scale_split as ss
     stride = int(sys.argv[1]) if len(sys.argv) > 1 else 2
     band_dex = float(sys.argv[2]) if len(sys.argv) > 2 else 0.6
-    band_rows, slope_rows = summarize(stride, band_dex)
-    tag = f'd{band_dex:g}_s{stride}'
+    profile = sys.argv[3] if len(sys.argv) > 3 else ss.CANONICAL_PROFILE
+    band_rows, slope_rows = summarize(stride, band_dex, profile)
+    # The result filenames carry the profile for the same reason the data
+    # trees do: an unsuffixed name is a claim that these are canonical fits.
+    tag = f'd{band_dex:g}_s{stride}{ss.profile_suffix(profile)}'
     os.makedirs(f'{_ROOT}/results', exist_ok=True)
     _write(band_rows, f'{_ROOT}/results/scale_profile_2d_{tag}_bands.csv')
     _write(slope_rows, f'{_ROOT}/results/scale_profile_2d_{tag}_slopes.csv')
-    _write(compare_to_3d(stride, band_dex),
+    _write(compare_to_3d(stride, band_dex, profile),
            f'{_ROOT}/results/scale_profile_2d_{tag}_vs3d.csv')
 
 

@@ -116,15 +116,18 @@ def band_edges(radii, band_dex):
     return out
 
 
-def _fit_profile(data, edges, stride, r_grid=None, profile='weibull'):
+def _fit_profile(data, edges, stride, r_grid=None,
+                 profile=ss.CANONICAL_PROFILE):
     """Fit every band on one image realisation.  Returns list of per-band dicts.
 
     `profile` selects the 1D form fit inside each band (see
-    scale_split.BAND_PROFILES).  'weibull' is the historical default; note that
-    within a single 0.6-dex band the Weibull's saturation scale is never
-    sampled (a1 exceeds the band's own outer radius in >99% of fits), so its
-    beta pins to a bound in ~63% of bands.  'powerlaw' fits the small-r limit
-    the Weibull is reducing to anyway, with one free profile parameter.
+    scale_split.BAND_PROFILES).  'powerlaw' is the default and is what the
+    paper reports: within a single 0.6-dex band the Weibull's saturation scale
+    is never sampled (a1 exceeds the band's own outer radius in >99% of fits),
+    so its beta pins to a bound in ~63% of bands.  The power law fits the
+    small-r limit the Weibull is reducing to anyway, with one free profile
+    parameter instead of three.  Pass profile='weibull' to reproduce the
+    historical run.
     """
     s2 = sf.compute_s2(data, **ss.COMPUTE_KW)
     if r_grid is None:
@@ -162,6 +165,15 @@ def _one_window(spec):
     row, col, size, stride, out_dir, band_dex, profile = spec
     path = os.path.join(out_dir, f'sp_r{row}_c{col}_s{size}.json')
     if os.path.exists(path):
+        # Never trust the directory name alone: a cached file records the
+        # profile it was fit with, and reusing one fit under a different model
+        # would silently mix two models in one table.  Fail loudly instead.
+        cached = json.load(open(path)).get('profile')
+        if cached != profile:
+            raise RuntimeError(
+                '%s was fit with profile %r but %r was requested; move or '
+                'delete the stale tree rather than mixing models'
+                % (path, cached, profile))
         return path, 'cached'
     t0 = time.time()
     # NB sf.read_window signature is (row0, col0, nrows, ncols) -- row FIRST.
@@ -200,15 +212,15 @@ def main():
     stride = int(sys.argv[2]) if len(sys.argv) > 2 else 2
     which = sys.argv[3] if len(sys.argv) > 3 else 'q4'
     band_dex = float(sys.argv[4]) if len(sys.argv) > 4 else BAND_DEX
-    profile = sys.argv[5] if len(sys.argv) > 5 else 'weibull'
+    profile = sys.argv[5] if len(sys.argv) > 5 else ss.CANONICAL_PROFILE
     if profile not in ss.BAND_PROFILES:
         raise SystemExit('profile must be one of %s' % sorted(ss.BAND_PROFILES))
 
     wl = json.load(open(f'{_ROOT}/handoff/{which}_windows.json'))
     specs_raw = wl['specs'] if isinstance(wl, dict) else wl
-    # The default output tree keeps its historical name so existing caches and
-    # the tracked result CSVs stay valid; a non-default profile gets a suffix.
-    suffix = '' if profile == 'weibull' else f'_{profile}'
+    # The canonical profile writes the unsuffixed tree; every other profile
+    # gets a suffix, so two profiles can never share a resumable cache.
+    suffix = ss.profile_suffix(profile)
     out_dir = f'{_ROOT}/data/scale_profile_d{band_dex:g}_s{stride}{suffix}'
     os.makedirs(out_dir, exist_ok=True)
     specs = [(int(r), int(c), int(s), stride, out_dir, band_dex, profile)

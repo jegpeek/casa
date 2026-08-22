@@ -88,11 +88,20 @@ def _dw0_only(s2):
     return out
 
 
-def _fit_one_2d(s2_band, stride):
-    """fit_s2 with the W-only geometry parameters frozen."""
+def _fit_one_2d(s2_band, stride, profile=ss.CANONICAL_PROFILE):
+    """fit_s2 with the W-only geometry parameters frozen.
+
+    The 1D profile must match the 3D driver's (see scale_split.BAND_PROFILES):
+    the whole point of this module is a like-for-like 2D/3D comparison, so a
+    profile mismatch between the two would make the comparison meaningless.
+    The profile's own required freeze is unioned with the 2D geometry freeze.
+    """
+    spec = ss.BAND_PROFILES[profile]
+    freeze = tuple(FREEZE_2D) + tuple(f for f in spec['freeze']
+                                      if f not in FREEZE_2D)
     try:
-        fit = sf.fit_s2(s2_band, profile=sf.weibull_log_s2,
-                        inner_uv_pixels=ss.INNER_UV, freeze=FREEZE_2D,
+        fit = sf.fit_s2(s2_band, profile=getattr(sf, spec['profile_fn']),
+                        inner_uv_pixels=ss.INNER_UV, freeze=freeze,
                         **dict(ss.FIT_KW, fit_stride=stride))
         rec = sf._fit_scalars(fit['params'])
         rec['fit_success'] = bool(getattr(fit.get('fit'), 'success', True))
@@ -105,14 +114,16 @@ def _fit_one_2d(s2_band, stride):
         return {'error': repr(exc)}
 
 
-def _fit_profile_2d(data, edges, stride, r_grid=None):
+def _fit_profile_2d(data, edges, stride, r_grid=None,
+                    profile=ss.CANONICAL_PROFILE):
     """Fit every in-plane band on one image realisation."""
     s2 = _dw0_only(sf.compute_s2(data, **ss.COMPUTE_KW))
     if r_grid is None:
         r_grid = ss._lag_radius_grid(s2)
     rows = []
     for lo, hi in edges:
-        rec = _fit_one_2d(ss._banded(s2, r_grid, lo, hi), stride)
+        rec = _fit_one_2d(ss._banded(s2, r_grid, lo, hi), stride,
+                          profile=profile)
         if 'error' not in rec and rec.get('fit_success'):
             rec['b2b1'] = rec['b2'] / rec['b1'] if rec['b1'] > 0 else float('nan')
         rec['r_lo'], rec['r_hi'] = float(lo), float(hi)
@@ -122,9 +133,15 @@ def _fit_profile_2d(data, edges, stride, r_grid=None):
 
 
 def _one_window(spec):
-    row, col, size, stride, out_dir, band_dex = spec
+    row, col, size, stride, out_dir, band_dex, profile = spec
     path = os.path.join(out_dir, f'sp2_r{row}_c{col}_s{size}.json')
     if os.path.exists(path):
+        cached = json.load(open(path)).get('profile')
+        if cached != profile:
+            raise RuntimeError(
+                '%s was fit with profile %r but %r was requested; move or '
+                'delete the stale tree rather than mixing models'
+                % (path, cached, profile))
         return path, 'cached'
     t0 = time.time()
     # NB sf.read_window signature is (row0, col0, nrows, ncols) -- row FIRST.
@@ -135,16 +152,17 @@ def _one_window(spec):
     edges = sp.band_edges(radii, band_dex)
     del s2_full
 
-    central, r_grid = _fit_profile_2d(data, edges, stride)
+    central, r_grid = _fit_profile_2d(data, edges, stride, profile=profile)
     samples = []
     for i in range(K):
         for j in range(K):
             d2 = ss._delete_block(data, i, j, K)
-            rows, _ = _fit_profile_2d(d2, edges, stride, r_grid=r_grid)
+            rows, _ = _fit_profile_2d(d2, edges, stride, r_grid=r_grid,
+                                      profile=profile)
             samples.append(dict(block=[i, j], bands=rows))
 
     out = dict(row=row, col=col, size=size, k=K, fit_stride=stride,
-               profile='weibull', method='scale_profile_2d', band_dex=band_dex,
+               profile=profile, method='scale_profile_2d', band_dex=band_dex,
                frozen=list(FREEZE_2D), n_bands=len(edges),
                bands=central, samples=samples,
                slopes={k: dict(zip(('slope', 'intercept', 'n'),
@@ -164,16 +182,21 @@ def main():
     stride = int(sys.argv[2]) if len(sys.argv) > 2 else 2
     which = sys.argv[3] if len(sys.argv) > 3 else 'q4'
     band_dex = float(sys.argv[4]) if len(sys.argv) > 4 else BAND_DEX
+    profile = sys.argv[5] if len(sys.argv) > 5 else ss.CANONICAL_PROFILE
+    if profile not in ss.BAND_PROFILES:
+        raise SystemExit('profile must be one of %s' % sorted(ss.BAND_PROFILES))
 
     wl = json.load(open(f'{_ROOT}/handoff/{which}_windows.json'))
     specs_raw = wl['specs'] if isinstance(wl, dict) else wl
-    out_dir = f'{_ROOT}/data/scale_profile_2d_d{band_dex:g}_s{stride}'
+    suffix = ss.profile_suffix(profile)
+    out_dir = f'{_ROOT}/data/scale_profile_2d_d{band_dex:g}_s{stride}{suffix}'
     os.makedirs(out_dir, exist_ok=True)
-    specs = [(int(r), int(c), int(s), stride, out_dir, band_dex)
+    specs = [(int(r), int(c), int(s), stride, out_dir, band_dex, profile)
              for r, c, s in specs_raw]
 
     print(f'{len(specs)} windows, stride {stride}, band {band_dex} dex, '
-          f'{n_workers} workers, UV-plane only -> {out_dir}', flush=True)
+          f'profile {profile}, {n_workers} workers, UV-plane only '
+          f'-> {out_dir}', flush=True)
     with Pool(n_workers) as pool:
         for n, (path, how) in enumerate(pool.imap_unordered(_one_window, specs), 1):
             print(f'[{n}/{len(specs)}] {how} {os.path.basename(path)}', flush=True)
