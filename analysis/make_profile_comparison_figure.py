@@ -29,6 +29,7 @@ for _p in (_ROOT, _HERE):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+import scale_split as ss                # noqa: E402
 import summarize_scale_profile as ssp   # noqa: E402
 import summarize_scale_slopes as sss    # noqa: E402
 
@@ -44,14 +45,30 @@ def load(profile, data_dir=None):
 
 
 def beta_table(data_dir=None):
-    """Per-band fraction of Weibull fits with beta pinned to each bound."""
+    """Per-band fraction of Weibull fits with beta pinned to each bound.
+
+    Reads the *weibull* tree by name.  It must not read the unsuffixed
+    directory: that is whichever profile is canonical, which since the power
+    law was adopted has no `beta` at all.  Every file is checked against the
+    profile tag it recorded, so a stale or mislabelled tree fails loudly
+    rather than being silently counted.
+    """
     import glob
     import json
     root = data_dir or os.path.join(_ROOT, 'data')
+    sub = 'scale_profile_d0.6_s2' + ss.profile_suffix('weibull')
     rows = []
-    for f in sorted(glob.glob(os.path.join(root, 'scale_profile_d0.6_s2',
-                                           'sp_r*.json'))):
+    files = sorted(glob.glob(os.path.join(root, sub, 'sp_r*.json')))
+    if not files:
+        raise SystemExit(
+            'no Weibull band fits under %s -- run\n'
+            "    python analysis/scale_profile.py --profile weibull\n"
+            'to produce them (see REPRODUCING.md).' % os.path.join(root, sub))
+    for f in files:
         d = json.load(open(f))
+        tag = d.get('profile')
+        if tag != 'weibull':
+            raise SystemExit('%s records profile=%r, expected weibull' % (f, tag))
         for bi, b in enumerate(d['bands']):
             if 'error' in b or not b.get('fit_success'):
                 continue

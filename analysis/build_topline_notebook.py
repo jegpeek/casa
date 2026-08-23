@@ -561,9 +561,24 @@ from the outer lags to a few degrees, against 60° for random unsigned axes in 3
 The structure has one orientation, not a scale-dependent one.
 
 *In-plane preference*: the long axis is not isotropically distributed — it prefers
-to lie in the echo plane. This one carries a mandatory caveat (report §2.7): the
-echo geometry itself has a preferred plane, so a selection effect has to be
-excluded before this can be called physical.
+to lie in the echo plane. This used to carry a mandatory caveat, on the reasoning
+that W is sampled ~14× more coarsely than the in-plane axes (epoch spacing rather
+than pixel scale), so unmodelled smearing along W could inflate apparent in-plane
+extent and manufacture the preference. **That reasoning was backwards.** Smearing
+along W is a convolution along W: it adds correlation length there and *lengthens*
+the recovered ellipsoid along W, rotating the long axis toward W and away from the
+plane. `analysis/w_smear_injection.py` measures it — a true 45° tilt is recovered
+at 34.5° under the most severe smearing tested — so the systematic works against
+the in-plane preference and the measured angle is a conservative floor
+(report §2.7).
+
+The same injection also answers the geometric half of the selection worry: with
+the real coverage pattern and real lag grid but no smearing, every injected tilt
+comes back to better than 0.3°, so the window's own lag geometry does not
+manufacture an in-plane preference. What that test does *not* cover is
+window-level selection — which windows are bright enough to fit at all — and it
+uses one window's coverage, so the magnitudes above should be checked on a few
+more before they are quoted.
 """)
 
 code(r"""
@@ -705,6 +720,7 @@ notebook — see `REPRODUCING.md` for the commands. In brief:
 | lag-band shape profiles | `analysis/scale_profile.py` | yes |
 | inner/outer split refits | `analysis/scale_split.py` | yes |
 | block bootstrap | `analysis/bootstrap_windows.py` | yes |
+| W-smearing injection test | `analysis/w_smear_injection.py` | yes |
 | **everything in this notebook** | — | **no** |
 
 Report sections not recomputed here, and why:
@@ -715,6 +731,9 @@ Report sections not recomputed here, and why:
   independent check on orientation and belongs in any tier-B rerun.
 * **§1.3**'s replicate distributions are summarized from the tracked bootstrap
   table; the replicates themselves are not tracked.
+* **§2.7** (the W-smearing systematic, which §1.9 above depends on) needs a real
+  window's lag grid — `analysis/w_smear_injection.py`, ~3 min. Its conclusion is
+  quoted in §1.9 rather than recomputed here.
 """)
 
 nb = nbf.v4.new_notebook(cells=cells)
