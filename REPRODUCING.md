@@ -120,6 +120,28 @@ python analysis/summarize_scale_profile.py           # -> *_bands.csv, *_slopes.
 python analysis/summarize_scale_slopes.py            # -> *_slopes_summary.csv
 ```
 
+### Systematics: does W-smearing fake the in-plane axis preference?
+
+W is sampled ~14x more coarsely than the in-plane axes (the lag grid steps at
+0.0016 ly; the W lags run 0, 0.0224 ... 0.2142 ly), which raised a standing
+worry that the measured preference of a1 for the echo plane was a sampling
+artifact. It is not, and the worry had its sign backwards — smearing along W
+*lengthens* the recovered ellipsoid along W, so it rotates the long axis
+**toward** W and away from the plane. The measured angle is therefore a
+conservative floor.
+
+```bash
+python analysis/w_smear_injection.py      # ~3 min; needs the Tier B arrays
+```
+
+Writes `results/w_smear_injection.{csv,png}` and
+`results/w_smear_inflation.csv`. At sigma_W = 0 the control recovers truth
+(isotropic input returns a2/a1 = 0.997, every tilt to <0.3 deg); under
+smearing a true 45 deg tilt is recovered at 39.8 deg (sigma_W = 0.03 ly) and
+34.5 deg (0.05 ly). Note this driver fits with the **Weibull**, not the
+canonical power law: the injected truth is a Weibull and the test is about
+geometry recovery, not profile choice.
+
 ### Which profile the band fits use
 
 The per-band ellipsoid fits use a simple **power law**
