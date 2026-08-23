@@ -269,6 +269,12 @@ profile, each in 3D (all 15 planes) and in the dW = 0 plane only ("2D"). The 3D
 power law is the published fit; the 2D fit is the independent in-plane
 measurement used to test the slicing hypothesis.
 
+All four are genuinely fit, and all four are stored — the per-window JSON keys
+them `3d|powerlaw`, `2d|powerlaw`, `3d|weibull`, `2d|weibull`. The cell below
+prints only the power law because that is the published fit; the Weibull's own
+shape parameter β is printed further down, where it is the diagnostic that
+motivates the profile choice rather than a result.
+
 The model separates *shape* from *profile*. A lower-triangular matrix **M**
 (parameters `s11, s22, s33, l12, l13, l23`) maps a lag vector to an ellipsoidal
 radius r = |M⁻¹ **dx**|, and S₂ is a function of that radius alone. Iso-S₂
@@ -304,6 +310,18 @@ print('Those two are different measurements of the same quantity: the first is')
 print('what the 3D ellipsoid implies its dW=0 central slice must look like, the')
 print('second fits that slice on its own.  Agreement is a real consistency')
 print('check, and confusing them turns it into a circular one.')
+print()
+
+fitw = central[('3d', 'weibull')]
+print('3D Weibull, fit on the same S2 (not the published fit):')
+for k in ['a2a1', 'a3a2', 'alpha', 'beta', 'var_inf', 'fit_success']:
+    v = fitw[k]
+    print('   %-11s %s' % (k, ('%.5g' % v) if isinstance(v, float) else v))
+_wb = sf.weibull_log_s2
+lo, hi = _wb.param_bounds[list(_wb.param_names).index('beta')]
+at = 'AT ITS UPPER BOUND' if fitw['beta'] > hi - 1e-3 else (
+     'AT ITS LOWER BOUND' if fitw['beta'] < lo + 1e-3 else 'interior')
+print('   beta bounds (%.1f, %.1f) -> %s' % (lo, hi, at))
 """)
 
 md(r"""
@@ -778,6 +796,13 @@ The band fits use a simple power law, not the Weibull (report §1.8b): inside a
 0.6-dex band the Weibull's turnover is never sampled, so its β is unidentified
 and pins to a bound in 63% of bands. Pass `profile='weibull'` to reproduce the
 historical run; it writes a separate `_weibull` tree so the caches cannot mix.
+
+β is not a narrow-band pathology alone: the single-band Weibull of §1.3, fit
+over the whole r < 0.1 ly range, pins in 18/29 windows (11 upper, 7 lower), and
+its median jackknife error is 0.67 on a median β of 1.38 — a 50 % error on the
+parameter. `beta` and `var_inf` are now columns in
+`singleband_powerlaw_r0.1_s2_k*.csv`, so this is checkable from the tracked
+table rather than only from the per-window JSONs.
 """)
 
 code(r"""

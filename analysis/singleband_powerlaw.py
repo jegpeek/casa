@@ -58,6 +58,13 @@ TRACK_3D = ('a2a1', 'a3a2', 'a3a1', 'T', 'p', 'b2b1', 'pa2d',
             'theta', 'phi', 'psi', 'incl', 'alpha')
 TRACK_2D = ('b2b1', 'pa2d', 'alpha')
 
+#: Profile-specific parameters, exported only on rows of that profile.
+#: The Weibull's `beta` and `var_inf` are FIT and stored in the per-window
+#: JSONs, but were not being written to the summary CSV, so a reader could not
+#: see that beta sits at a bound in most windows -- the very reason the power
+#: law was adopted as canonical.  They are the diagnostic, so they are exported.
+TRACK_PROFILE = {'weibull': ('beta', 'var_inf'), 'powerlaw': ()}
+
 PROFILES = {'powerlaw': sf.power_law_log_s2, 'weibull': sf.weibull_log_s2}
 
 
@@ -187,7 +194,7 @@ def summarize(paths, csv_path):
                      rms_resid=cen.get('rms_resid', float('nan')),
                      n_fit=cen.get('n_fit', 0),
                      chi2=cen.get('chi2', float('nan')))
-            for q in keys[mode]:
+            for q in keys[mode] + TRACK_PROFILE.get(profile, ()):
                 r[q] = cen.get(q, float('nan'))
                 r['se_' + q] = _jk_se([s.get(tag, {}).get(q)
                                        for s in rec['samples']])
