@@ -6,11 +6,16 @@ binding one.  This runs every code cell with `exec` in one shared namespace --
 the same execution model a kernel provides for a top-to-bottom run -- captures
 stdout and any `IPython.display` calls, and stores them as cell outputs.
 
-Limits, stated so nobody mistakes this for a kernel: no interactivity, no
-`In[]`/`Out[]` expression echo (only what a cell prints), and cell execution
-stops at the first exception, which is reported.  For a linear walkthrough
-notebook that is sufficient, and the committed .ipynb ends up with real
-outputs rather than empty cells.
+A cell's trailing bare expression is echoed the way a kernel echoes `Out[]`: a
+matplotlib Figure is rendered to PNG, and anything else becomes an
+`execute_result` carrying `text/plain` plus `text/html` when the object provides
+`_repr_html_`, so a cell ending in a bare DataFrame renders as a table.
+
+Limits, stated so nobody mistakes this for a kernel: no interactivity, only the
+*final* expression of a cell is echoed (a kernel echoes nothing else either),
+and cell execution stops at the first exception, which is reported.  For a
+linear walkthrough notebook that is sufficient, and the committed .ipynb ends
+up with real outputs rather than empty cells.
 
     python analysis/execute_notebook_inproc.py notebooks/topline_results.ipynb
 """
@@ -24,11 +29,30 @@ import traceback
 import nbformat as nbf
 
 
+def _repr_bundle(value):
+    """MIME bundle for a cell's trailing expression, as a kernel would build it.
+
+    Includes text/html when the object offers `_repr_html_` (pandas objects do),
+    so a cell ending in a bare DataFrame renders as a real table.
+    """
+    data = {'text/plain': repr(value)}
+    html = getattr(value, '_repr_html_', None)
+    if callable(html):
+        try:
+            out = html()
+        except Exception:
+            out = None
+        if isinstance(out, str):
+            data['text/html'] = out
+    return data
+
+
 class _Display:
     """Minimal stand-in for IPython.display that records what a cell shows."""
 
     def __init__(self):
         self.captured = []
+        self.results = []
 
     def _image(self, filename=None, data=None, width=None, **kw):
         if filename is not None:
@@ -83,6 +107,10 @@ def _exec_cell(source, ns, disp):
         disp.captured.append(('image/png',
                               base64.b64encode(buf.getvalue()).decode(),
                               None))
+        return
+    # Anything else is an Out[] value: echo it the way a kernel does, so a cell
+    # ending in a bare DataFrame renders as a table instead of showing nothing.
+    disp.results.append(_repr_bundle(value))
 
 
 def execute(path):
@@ -105,6 +133,7 @@ def execute(path):
                 continue
             n_run += 1
             disp.captured.clear()
+            disp.results.clear()
             buf = io.StringIO()
             outputs = []
             try:
@@ -126,6 +155,10 @@ def execute(path):
                 meta = {mime: {'width': width}} if width else {}
                 outputs.append(nbf.v4.new_output(
                     'display_data', data={mime: b64}, metadata=meta))
+            for data in disp.results:
+                outputs.append(nbf.v4.new_output(
+                    'execute_result', data=data, metadata={},
+                    execution_count=n_run))
             cell.outputs = outputs
             cell.execution_count = n_run
     finally:

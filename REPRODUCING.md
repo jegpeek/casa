@@ -28,7 +28,17 @@ soft and everything in `analysis/` works without it.
 
 ## Tier A — reproduce the headline numbers
 
-**Start here: `notebooks/topline_results.ipynb`.** It is a guided walkthrough of
+**New to the project? Start with `notebooks/main_results.ipynb`.** It is the
+short guide: the five main results, the code that produces each, and the two
+published figures — no side checks or systematics. Committed with outputs, so it
+reads without running. Regenerate with
+
+```bash
+python analysis/build_main_results_notebook.py
+python analysis/execute_notebook_inproc.py notebooks/main_results.ipynb
+```
+
+**For every claim in report §1: `notebooks/topline_results.ipynb`.** It is a guided walkthrough of
 every claim in report §1, recomputing each one from the tracked tables and
 printing it beside the value the report asserts, with the reasoning for each
 sample cut and subset in prose. It is committed *with outputs*, so it can be read
