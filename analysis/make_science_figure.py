@@ -143,6 +143,15 @@ def shape_plane_data(k=mtf.K, floor=mtf.FLOOR):
     # calculation, which takes its span from the data minimum.
     d = d_all[(d_all.a2a1 >= mtf.DEGEN) & (d_all.a3a2 >= mtf.DEGEN)].copy()
     rng = mtf.shared_ratio_range(d, floor=floor)
+    # PRINT VERSION ONLY: stop the panel at exactly 1.  Both ratios are <= 1 by
+    # construction (a1 >= a2 >= a3), so the screen version's headroom above
+    # unity is unphysical space, and clipping it makes the frame itself carry
+    # the physics -- the top spine IS the a3 = a2 (prolate) locus, the right
+    # spine IS the a2 = a1 (oblate) locus, and their corner is the sphere.  This
+    # hides no drawn point (max ratios 0.92, 0.92); it does truncate the upper
+    # arm of 9 x- and 15 y-error bars at the physical limit, which is stated in
+    # the caption.  The data minimum still sets the lower end.
+    rng = (rng[0], 1.0)
 
     q4_fit = d_all[d_all.tier == 'q4']
     mu21, s21, _, me21 = mtf.ml_center_and_scatter(q4_fit.a2a1.values,
@@ -207,8 +216,11 @@ def fig_shape_plane_science(S, ncol=2):
     # by hand instead leaves either a non-square panel or a band of dead space
     # under the axis label.
     w = SCIENCE_WIDTH_CM[ncol] * CM
-    L, R, T = 0.44, 0.06, 0.06          # left / right / top margins, inches
-    XLAB, LEGH = 0.30, 0.50             # x-label band, legend band, inches
+    # Right and top margins must now clear the two edge labels (rotated
+    # "oblate (a2 = a1)" on the right, "prolate (a3 = a2)" above); the x-label
+    # band shrank because the label is now the bare ratio on one line.
+    L, R, T = 0.44, 0.44, 0.18          # left / right / top margins, inches
+    XLAB, LEGH = 0.24, 0.50             # x-label band, legend band, inches
     side = w - L - R                    # square panel side
     h = T + side + XLAB + LEGH
     fig = plt.figure(figsize=(w, h))
@@ -286,17 +298,30 @@ def fig_shape_plane_science(S, ncol=2):
         a.set_major_locator(FixedLocator(ratio_ticks(rng)))
         a.set_minor_locator(FixedLocator([]))
         a.set_major_formatter(FuncFormatter(lambda v, _p: ('%g' % v)))
-    ax.set_xlabel(r'$a_2/a_1$    (lag ratio at fixed $S_2$)')
-    ax.set_ylabel(r'$a_3/a_2$    (lag ratio at fixed $S_2$)')
+    # Bare ratios: the parenthetical gloss ("lag ratio at fixed S_2") moves to
+    # the caption at the user's request.  The caption must therefore keep the
+    # sentence establishing that these are lag lengths at fixed S_2 and hence
+    # independent of the structure-function slope -- it is now the only place
+    # that is said.
+    ax.set_xlabel(r'$a_2/a_1$')
+    ax.set_ylabel(r'$a_3/a_2$')
 
     # Which side of the diagonal is which.  Inside the axes, on the side each
     # regime occupies, so the divide needs no key.
-    # The two far corners are the only interior regions with no markers; the
-    # mid-panel positions used in the screen version sit on top of error bars.
-    ax.text(0.022, 0.972, 'prolate', transform=ax.transAxes, ha='left',
+    # Regime labels annotate the EDGES, not corners: prolate is the degenerate
+    # limit a3 = a2, which is the whole top spine, and oblate is a2 = a1, the
+    # whole right spine -- a corner label would imply the regime lives only
+    # there.  Both sit just outside the frame, centred on their spine, so they
+    # cannot land on data; the isotropic label goes inside its corner because
+    # outside it would collide with the other two, and the corner interior is
+    # empty (no window has both ratios above 0.80).
+    ax.text(0.5, 1.012, 'prolate  ($a_3 = a_2$)', transform=ax.transAxes,
+            ha='center', va='bottom', fontsize=SIZES['annot'], color='0.30')
+    ax.text(1.012, 0.5, 'oblate  ($a_2 = a_1$)', transform=ax.transAxes,
+            ha='center', va='bottom', rotation=270, rotation_mode='anchor',
+            fontsize=SIZES['annot'], color='0.30')
+    ax.text(0.978, 0.972, 'isotropic', transform=ax.transAxes, ha='right',
             va='top', fontsize=SIZES['annot'], color='0.30')
-    ax.text(0.978, 0.022, 'oblate', transform=ax.transAxes, ha='right',
-            va='bottom', fontsize=SIZES['annot'], color='0.30')
 
     # --- legend band below the frame -----------------------------------------
     # Points first (three tiers), then the three fit glyphs, in two columns:
@@ -367,12 +392,18 @@ def caption(S):
         'independent of the structure-function slope. Error bars are '
         '$\\pm1\\sigma$ from block jackknife ($k = %d$); on a logarithmic axis '
         'a symmetric bar reaches the axis floor where the uncertainty exceeds '
-        'the value. Windows are split at the quartiles of their echo '
+        'the value. Both axes stop at unity, the physical limit of each ratio, '
+        'so the top and right edges are the prolate ($a_3 = a_2$) and oblate '
+        '($a_2 = a_1$) degenerate loci and their corner is a sphere; error bars '
+        'reaching the limit are truncated there. Windows are split at the '
+        'quartiles of their echo '
         'signal-to-noise ratio (%s) and drawn back to front, so the '
         'best-measured '
         'quartile is never hidden. The grey diagonal is $a_2/a_1 = a_3/a_2$, '
-        'separating prolate (cigar-like) from oblate (pancake-like) '
-        'ellipsoids.\n\n'
+        'on which the two ratios are equal: windows above it are the more '
+        'prolate (cigar-like), those below the more oblate (pancake-like), '
+        'while the marked edges are the limits at which an ellipsoid becomes '
+        'exactly prolate or exactly oblate.\n\n'
         'The blue diamond is the maximum-likelihood common shape of the '
         'highest signal-to-noise quartile, $a_2/a_1 = %.2f$, '
         '$a_3/a_2 = %.2f$. The dashed ellipse is the null hypothesis that '
