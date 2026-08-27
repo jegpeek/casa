@@ -45,6 +45,7 @@ the caption so a referee tallying markers finds no discrepancy.
 """
 import os
 import numpy as np
+import matplotlib.patheffects as pe
 
 import make_tier_figures as mtf
 
@@ -220,7 +221,9 @@ def fig_shape_plane_science(S, ncol=2):
     # "oblate (a2 = a1)" on the right, "prolate (a3 = a2)" above); the x-label
     # band shrank because the label is now the bare ratio on one line.
     L, R, T = 0.44, 0.44, 0.18          # left / right / top margins, inches
-    XLAB, LEGH = 0.24, 0.50             # x-label band, legend band, inches
+    # XLAB must clear the descender of the mathtext subscript in "$a_2/a_1$",
+    # which hangs ~0.01 in below the text baseline box.
+    XLAB, LEGH = 0.32, 0.0              # x-label band; legend now sits INSIDE
     side = w - L - R                    # square panel side
     h = T + side + XLAB + LEGH
     fig = plt.figure(figsize=(w, h))
@@ -323,16 +326,37 @@ def fig_shape_plane_science(S, ncol=2):
     ax.text(0.978, 0.972, 'isotropic', transform=ax.transAxes, ha='right',
             va='top', fontsize=SIZES['annot'], color='0.30')
 
-    # --- legend band below the frame -----------------------------------------
-    # Points first (three tiers), then the three fit glyphs, in two columns:
-    # the identity entries and the model entries read as two groups.
-    leg = fig.legend(pt_handles + handles,
-                     [h.get_label() for h in pt_handles + handles],
-                     loc='lower center', bbox_to_anchor=(0.5, 0.002),
-                     ncol=2, frameon=False, fontsize=SIZES['annot'],
-                     handlelength=1.7, handletextpad=0.6,
-                     columnspacing=1.1, labelspacing=0.34,
-                     borderaxespad=0.0)
+    # --- legend inside the panel, bottom centre ------------------------------
+    # Moved in from below the frame to save ~1.3 cm of column height.  The
+    # bottom band holds no markers (nothing has a3/a2 below the band except
+    # five lower-tier windows at the far left and right) and the 1:1 diagonal
+    # passes well above it, but 14 error bars do cross it -- three of them top
+    # quartile, whose lower arms run to the axis floor.  An OPAQUE patch would
+    # make those bars appear to terminate at the legend edge, inventing a bar
+    # end where the real signal is "uncertainty exceeds the value", so the
+    # legend stays frameless and the bars read through behind it.  Verified
+    # legible at 12.1 cm print size.
+    # y offset clears the single lowest marker (a lower-tier window at axes
+    # fraction y = 0.019) rather than covering it; checked programmatically,
+    # not eyeballed.
+    leg = ax.legend(pt_handles + handles,
+                    [h.get_label() for h in pt_handles + handles],
+                    loc='lower center', bbox_to_anchor=(0.5, 0.035),
+                    ncol=2, frameon=False, fontsize=SIZES['annot'],
+                    handlelength=1.7, handletextpad=0.6,
+                    columnspacing=1.1, labelspacing=0.34,
+                    borderaxespad=0.0)
+    # 13 error bars pass behind the legend.  Two fixes, both needed: the tier
+    # zorders run to ~6.5, above a legend's default of 5, so a top-quartile bar
+    # was drawing straight OVER the words -- the legend is lifted clear of every
+    # data artist.  And a white halo on the glyphs (not a filled frame) keeps
+    # the text readable where a bar passes close, while leaving the bars
+    # continuous: an opaque patch would break three top-quartile bars at the
+    # legend edge and read as a bar end, when the real signal is that their
+    # uncertainty runs to the axis floor.
+    leg.set_zorder(20)
+    for t in leg.get_texts():
+        t.set_path_effects([pe.withStroke(linewidth=1.6, foreground='white')])
     return fig, ax, leg
 
 
