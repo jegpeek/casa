@@ -85,6 +85,100 @@ covariant and the two ratio errors are anticorrelated (median rho = -0.43). The
 correct visualisation is a tilted 2x2 error ellipse per window, not an upright
 cross.
 
+## The arcsinh transform, and the raw-flux rerun
+
+Every published number is measured on `arcsinh(flux / 0.03)` after subtracting an
+additive floor of 0.03 from the flux. Two points about that, because the code's
+own names for it are misleading:
+
+- The `background=0.03` passed to `compute_s2` is an **additive flux floor**
+  unrelated to the echo, *not* a noise level, and it is separate from the
+  per-epoch sky already removed when the chunk products were built.
+- The comment in `structure_function.py` calling `arcsinh_scale` a noise scale,
+  and the docstring saying it is "typically set to the per-pixel noise level",
+  do not describe what the parameter does here. Its function is **dynamic-range
+  compression**. Do not quote either label in the paper.
+
+Because the floor subtraction happens *inside* the nonlinearity, the two being
+the same number (0.03) is one coupled choice, not two independent knobs. That
+makes "how much does the transform shape the result?" a real referee question,
+so the whole 115-window pipeline was rerun in raw flux units with no transform
+and no floor, changing nothing else.
+
+The preprocessing is selected by one environment variable, `CASA_LINEAR_UNITS`,
+read in `analysis/scale_split.py`. It is deliberately not a per-script flag: it
+has to be the same for the fits, the SNR audit and the figures, and every output
+path picks up a `_linear` suffix from it so the two variants cannot overwrite
+each other.
+
+```bash
+export PYTHONPATH="$PWD:$PWD/analysis"
+export CASA_LINEAR_UNITS=1
+
+# refit (resumable: one JSON per window, existing files are skipped)
+python analysis/singleband_powerlaw.py --rcut 0.1 --k 4 --procs 6
+# re-tier: the SNR table must move WITH the fit table (see below)
+python analysis/noise_audit_windows.py
+# figures: --variant defaults from CASA_LINEAR_UNITS
+python analysis/make_tier_figures.py --k 4
+
+# the comparison reads BOTH variants' tables, so run it unset
+unset CASA_LINEAR_UNITS
+python analysis/compare_linear_vs_arcsinh.py
+python analysis/fig_linear_vs_arcsinh.py
+```
+
+Thread caps matter for the refit: each worker spawns its own BLAS threads, so
+without `OMP_NUM_THREADS=1` (and the OPENBLAS/MKL/VECLIB/NUMEXPR equivalents)
+6 processes oversubscribe a 12-core machine badly.
+
+**Every conclusion survives; the significances weaken.** Full table in
+`results/linear_vs_arcsinh_headline.csv`, figure in
+`results/figures/linear_vs_arcsinh.png`:
+
+| quantity | published | raw flux |
+|---|---|---|
+| common axis ratios `a1:a2:a3` | 1 : 0.281 : 0.168 | 1 : 0.251 : 0.134 |
+| prolate significance | 6.85 sigma | 5.03 sigma |
+| windows individually prolate | 25 / 29 | 25 / 29 |
+| intrinsic scatter `a2/a1` | 0.127 dex | 0.151 dex |
+| intrinsic scatter `a3/a2` | 0.100 dex | 0.140 dex |
+| p(one exact shape), `a3/a2` | 8e-08 | 3e-16 |
+| common small-lag slope `alpha` | 0.583 | 0.579 |
+| rho(inclination vs `b2/b1`) | -0.694 (p=3e-05) | -0.596 (p=6e-04) |
+| median inclination to echo plane | 73.6 deg | 68.1 deg |
+
+The direction is coherent and is what removing dynamic-range compression should
+do: the shapes come out slightly *more* elongated, the per-window error bars
+grow, and every significance that depends on those error bars drops. Result 2 is
+the exception that confirms it — the *scatter* grows, so the "one exact shape"
+null is rejected harder, not more weakly.
+
+Two things were checked so the comparison is genuinely single-variable:
+
+- **The tiering.** The `snr` column is a ratio of S2 plateau to S2 floor, and the
+  nonlinearity compresses those two differently, so the SNR table cannot be
+  reused across variants — `load()` therefore refuses to mix them, and the tier
+  legend strings are rewritten from whichever table is loaded rather than
+  hard-coded. Recomputing the tiering turns out to be nearly a no-op
+  (Spearman 0.994 between the two SNR orderings; the top quartile keeps 28 of 29
+  windows), and the `linear_frozen_tiers` column in the comparison table shows
+  the shifts are attributable to the refit, not to sample membership.
+- **Convergence.** Fit success is unchanged (114/115) and the usable count moves
+  by one (113 -> 112), but collapsed fits — either ratio below `DEGEN = 0.02`,
+  the repository's own cut — rise from 13 to 18, so the figures draw 94 windows
+  instead of 100. One collapsed window (row 2000, col 3600) lands in the top
+  quartile at `a2/a1 = 0.0021`. It was left in: that is 27 dex of log-space
+  standard error, so the ML estimator already gives it essentially no weight.
+  Excluding it by hand would be a worse choice than letting the likelihood
+  handle it.
+
+One row in the table does change qualitatively and should not be over-read:
+`frac_within30_of_W` goes from exactly 0 to 0.034. That is a single window
+(row 3200, col 2000) whose fitted inclination moves 76 deg -> 14 deg — but its
+own inclination error is 39 deg, so it is unconstrained in both runs rather than
+newly pointing along W.
+
 ## Known caveat
 
 At 200px the axis *ratios* are robust but the absolute axes are not: 97% of

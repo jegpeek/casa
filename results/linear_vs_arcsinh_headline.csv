@@ -1,0 +1,26 @@
+quantity,key,published,linear,linear_frozen_tiers,pct_change
+usable windows,n_usable,113,112,112,-0.8849557522123894
+windows in q4 (top-SNR quartile),n_q4,29,29,29,0.0
+R1  common a2/a1,common_a2a1,0.2811,0.2511,0.2628,-10.68933990147071
+R1  common a3/a2,common_a3a2,0.5958,0.5358,0.5470,-10.078519537882316
+R1  implied a3/a1,axis_a3a1,0.1675,0.1345,0.1438,-19.69053222891264
+R1  prolateness [dex],prolateness_dex,0.3650,0.3813,0.3741,4.451207832169839
+R1  prolate significance [sigma],prolateness_sigma,6.85,5.03,5.02,-26.579564635155428
+R1  windows individually prolate,n_prolate,25,25,25,0.0
+R2  intrinsic scatter a2/a1 [dex],sigint_a2a1_dex,0.1273,0.1508,0.1559,18.46231199525043
+R2  intrinsic scatter a3/a2 [dex],sigint_a3a2_dex,0.1002,0.1398,0.1350,39.632235969629356
+R2  intrinsic scatter a2/a1 [%],scatter_a2a1_pct,34.0,41.5,43.2,21.885813477496132
+R2  intrinsic scatter a3/a2 [%],scatter_a3a2_pct,25.9,38.0,36.5,46.46886145217349
+R2  p(one exact shape) a2/a1,p_zero_scatter_a2a1,2.90e-04,4.63e-04,4.09e-05,59.435245423025115
+R2  p(one exact shape) a3/a2,p_zero_scatter_a3a2,8.10e-08,3.24e-16,5.22e-15,-99.99999959977104
+"R3  rho(incl, b2/b1)",spearman_rho,-0.6941,-0.5961,-0.6222,14.123491838183092
+R3  p value,spearman_p,2.97e-05,6.45e-04,3.14e-04,2074.0957124727142
+R3  measured b2/b1 min,b2b1_min,0.1218,0.0876,0.0876,-28.061253127733227
+R3  measured b2/b1 max,b2b1_max,0.8728,0.9007,0.9007,3.194962159598988
+R4  common alpha,alpha_common,0.5829,0.5787,0.5794,-0.7084263060327037
+R4  median alpha,alpha_median,0.5905,0.5958,0.5958,0.8916004728696719
+R4  alpha intrinsic scatter [dex],alpha_sigint_dex,0.0389,0.0463,0.0460,19.003677036589735
+R5  median inclination [deg],incl_median_deg,73.6,68.1,67.3,-7.400934317972482
+R5  fraction within 30 deg of plane,frac_within30_of_plane,0.828,0.759,0.724,-8.333333333333337
+R5  fraction within 30 deg of W,frac_within30_of_W,0.000,0.034,0.034,
+R5  KS p vs isotropic,ks_p_isotropic,3.16e-04,5.98e-03,2.04e-02,1792.1540931446489

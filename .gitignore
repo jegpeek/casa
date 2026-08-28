@@ -33,3 +33,8 @@ notebooks/figures/
 
 # Output of notebooks/run_analysis.ipynb: a regenerable mirror of results/+data/.
 rerun/
+
+# Per-window S2 caches for the noise audit. Untracked (like the published
+# data/noise_audit_cache/) because the audit's deliverable is the summary table
+# results/noise_audit_table*.csv, which IS tracked and is what the tiering reads.
+data/noise_audit_cache*/

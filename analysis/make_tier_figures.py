@@ -22,15 +22,44 @@ TIERS = [
 ]
 
 
-def load(k=K):
-    """Fit table joined to SNR tier, one row per window (3D power law)."""
+def _relabel_tiers(d):
+    """Rewrite the TIERS legend strings to this table's measured SNR ranges.
+
+    TIERS carries the range in its label text ('top quartile (SNR 4.0-7.0)').
+    Those numbers are a property of the SNR column, not of the plot, so under a
+    different preprocessing they go stale.  Mutating the module-level TIERS in
+    place keeps both figure functions consistent without threading the labels
+    through their signatures.
+    """
+    stem = {'q4': 'top quartile', 'q3': '2nd quartile',
+            'bottom_half': 'bottom half'}
+    for i, (tier, col, lab, sz, al) in enumerate(TIERS):
+        s = d.loc[d.tier == tier, 'snr'].dropna()
+        if len(s):
+            new = '%s (SNR %.1f-%.1f)' % (stem[tier], s.min(), s.max())
+        else:
+            new = stem[tier]
+        TIERS[i] = (tier, col, new, sz, al)
+
+
+def load(k=K, variant=''):
+    """Fit table joined to SNR tier, one row per window (3D power law).
+
+    `variant` selects the preprocessing: '' is the published arcsinh run,
+    '_linear' the raw-flux run written under CASA_LINEAR_UNITS=1.  BOTH inputs
+    move together -- the fit table and the SNR tiering must come from the same
+    preprocessing, because `snr` is an S2 plateau-over-floor ratio and the
+    arcsinh compresses the plateau relative to the floor.  Mixing them would
+    tier linear-units fits by arcsinh-units SNR.
+    """
     tag = 'r%g_s%d' % (RCUT, STRIDE)
     if k != 2:
         tag += '_k%d' % k
-    df = pd.read_csv(os.path.join(ROOT, 'results',
-                                  'singleband_powerlaw_%s.csv' % tag))
+    df = pd.read_csv(os.path.join(
+        ROOT, 'results', 'singleband_powerlaw_%s%s.csv' % (tag, variant)))
     d3 = df[(df['mode'] == '3d') & (df.profile == 'powerlaw')].copy()
-    snr = pd.read_csv(os.path.join(ROOT, 'results', 'noise_audit_table.csv'))
+    snr = pd.read_csv(os.path.join(
+        ROOT, 'results', 'noise_audit_table%s.csv' % variant))
     q75, q50 = np.percentile(snr.snr, [75, 50])
     snr['tier'] = np.where(snr.snr >= q75, 'q4',
                            np.where(snr.snr >= q50, 'q3', 'bottom_half'))
@@ -314,7 +343,7 @@ def apply_figure_style(sizes=(8, 7, 6)):
         'legend.fontsize': sizes[2],
     })
 
-def main(k=K, floor=FLOOR, outdir=None):
+def main(k=K, floor=FLOOR, outdir=None, variant=''):
     import matplotlib
     matplotlib.use('Agg')
     outdir = outdir or os.path.join(ROOT, 'results', 'figures')
@@ -322,8 +351,12 @@ def main(k=K, floor=FLOOR, outdir=None):
 
     apply_figure_style()
 
-    d_all = d = load(k=k)[0]
+    d_all = d = load(k=k, variant=variant)[0]
     d_all = d = d_all[usable(d_all)]
+    # Tier legend labels quote the SNR range of each tier, so they must be
+    # measured from THIS table: the linear-units SNR spans a different range
+    # than the arcsinh one, and a hard-coded string would silently mislabel it.
+    _relabel_tiers(load(k=k, variant=variant)[0])
 
     # STANDING RULE for this project: clipping affects only what is DRAWN.  The
     # ML fits always use the full usable top-quartile sample, so the published
@@ -380,8 +413,8 @@ def main(k=K, floor=FLOOR, outdir=None):
                      'not of the plotted points'))),
     ]
 
-    f1 = os.path.join(outdir, 'b2b1_vs_inclination_all115.png')
-    f2 = os.path.join(outdir, 'shape_plane_all115.png')
+    f1 = os.path.join(outdir, 'b2b1_vs_inclination_all115%s.png' % variant)
+    f2 = os.path.join(outdir, 'shape_plane_all115%s.png' % variant)
     fig_inclination(d, rng, shape=(c21, c32), out=f1)
     fig_shape_plane(d, rng, ell=ells, out=f2)
 
@@ -399,5 +432,11 @@ if __name__ == '__main__':
     ap.add_argument('--k', type=int, default=K, help='jackknife blocking (4 = deliverable)')
     ap.add_argument('--floor', type=float, default=FLOOR, help='lower ratio-axis floor')
     ap.add_argument('--outdir', default=None)
+    # Default from the same env switch that drives the fits and the SNR audit,
+    # so CASA_LINEAR_UNITS=1 selects the preprocessing for the WHOLE pipeline
+    # and the figures cannot silently be built from the other variant's tables.
+    _lin = os.environ.get('CASA_LINEAR_UNITS', '') not in ('', '0')
+    ap.add_argument('--variant', default='_linear' if _lin else '',
+                    help="'' = published arcsinh run, '_linear' = raw flux")
     a = ap.parse_args()
-    main(k=a.k, floor=a.floor, outdir=a.outdir)
+    main(k=a.k, floor=a.floor, outdir=a.outdir, variant=a.variant)

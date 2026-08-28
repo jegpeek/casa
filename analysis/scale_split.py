@@ -72,6 +72,30 @@ K = 2  # 2x2 image blocks -> 4 delete-one-block jackknife samples
 # here would make the full-band control fit disagree with the committed runs,
 # which is the canary that these have drifted apart.
 COMPUTE_KW = dict(background=0.03, arcsinh_scale=0.03, assume_stationary=True)
+
+# ---------------------------------------------------------------- linear mode
+# Setting CASA_LINEAR_UNITS=1 in the environment switches the whole pipeline to
+# raw flux units: no additive floor removed, no arcsinh compression.  Every
+# driver reads COMPUTE_KW from this module, so the override lands in all of them
+# at once and cannot drift between them.
+#
+# NB this is deliberately ONE switch and not two.  With arcsinh_scale=None the
+# transform chain reduces to (f - background), and S2 is a function of pixel
+# DIFFERENCES, so a constant offset cancels exactly: measured max |dS2| between
+# background=0 and background=0.03 is 2.7e-19 (counts-weighted mean 1.1e-25),
+# i.e. float round-off at the zero-lag cell.  Zeroing the background therefore
+# has no effect once the nonlinearity is gone, and the two published values
+# being the same number (0.03) is a coupled choice rather than two knobs: what
+# the arcsinh actually receives is x = (f - 0.03)/0.03.
+#
+# Kept as an env var rather than a function argument because the drivers reach
+# COMPUTE_KW through module state inside `spawn`-ed Pool workers, which re-import
+# this module and would not see a mutation made in the parent process.
+LINEAR_COMPUTE_KW = dict(background=0.0, arcsinh_scale=None,
+                         assume_stationary=True)
+LINEAR_UNITS = os.environ.get('CASA_LINEAR_UNITS', '') not in ('', '0')
+if LINEAR_UNITS:
+    COMPUTE_KW = dict(LINEAR_COMPUTE_KW)
 FIT_KW = dict(max_nfev=None, weighting='1/r', min_n_fraction=0.1)
 READ_KW = dict(edge_mask_radius=50, min_coverage=0.25)
 INNER_UV = 200

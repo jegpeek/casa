@@ -155,8 +155,11 @@ def _one_window(spec):
             rec['block'] = [i, j]
             samples.append(rec)
 
+    # compute_kw is recorded so a cached fit can never be misattributed to the
+    # wrong preprocessing: arcsinh_scale=None marks a raw-flux (linear) fit.
     out = dict(row=row, col=col, size=size, k=k_blocks, fit_stride=stride,
                rcut=rcut, frozen_2d=list(FREEZE_2D),
+               compute_kw={k: v for k, v in ss.COMPUTE_KW.items()},
                central={'%s|%s' % k: v for k, v in central.items()},
                samples=samples, seconds=time.time() - t0)
     os.makedirs(out_dir, exist_ok=True)
@@ -245,6 +248,11 @@ def main():
     tag = 'r%g_s%d' % (args.rcut, args.stride)
     if args.k != K_DEFAULT:
         tag += '_k%d' % args.k
+    # The preprocessing mode is part of the cache identity: a linear-units fit
+    # and an arcsinh fit of the same window are different measurements and must
+    # never share a directory (the worker skips any window whose JSON exists).
+    if ss.LINEAR_UNITS:
+        tag += '_linear'
     out_dir = args.out_dir or os.path.join(_ROOT, 'results',
                                            'singleband_%s' % tag)
     jobs = [(r, c, args.size, args.stride, args.rcut, out_dir, args.k)
