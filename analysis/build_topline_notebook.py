@@ -87,6 +87,13 @@ for p in (ROOT, os.path.join(ROOT, 'analysis')):
     if p not in sys.path:
         sys.path.insert(0, p)
 
+# This notebook's prose asserts specific arcsinh numbers, so it pins the
+# preprocessing variant rather than following the repo default -- otherwise a
+# reader with CASA_LINEAR_UNITS=1 exported gets tables that contradict the text.
+# Must precede the mtf import: the variant is read at import time.
+os.environ.pop('CASA_LINEAR_UNITS', None)
+os.environ['CASA_ARCSINH_UNITS'] = '1'
+
 import make_tier_figures as mtf
 import shape_center as sc
 import slicing_model as sm
@@ -162,7 +169,10 @@ geometry rather than an artifact of the 2D fitting procedure.
 code(r"""
 # The measured 2D fit is a separate row in the same table (mode == '2d').
 tag = 'r%g_s%d_k%d' % (mtf.RCUT, mtf.STRIDE, K)
-raw = pd.read_csv(os.path.join(ROOT, 'results', 'singleband_powerlaw_%s.csv' % tag))
+# Same variant as mtf.load above -- the 2D rows live in the same table, and
+# mixing preprocessings between the 3D and 2D fits would be a silent error.
+raw = pd.read_csv(os.path.join(ROOT, 'results', 'singleband_powerlaw_%s%s.csv'
+                               % (tag, mtf.default_variant())))
 d2 = raw[(raw['mode'] == '2d') & (raw.profile == 'powerlaw')]
 
 j = q4[['chunk', 'row', 'col', 'incl', 'se_incl', 'b2b1']].merge(
@@ -250,7 +260,14 @@ for c, lab in [('a2a1', 'a2/a1'), ('a3a2', 'a3/a2')]:
 shape = pd.DataFrame(rows)
 print(shape.to_string(index=False))
 print()
-print('report: a2/a1 = 0.285 +- 0.039 dex,  a3/a2 = 0.601 +- 0.025 dex')
+# The report's tabulated values are from the ARCSINH run.  Label them, because
+# the table above is built from whichever variant is the current default (raw
+# flux), and an unlabelled "report:" line next to it reads as a failed
+# reproduction rather than a different preprocessing.
+print('report (arcsinh run): a2/a1 = 0.285 +- 0.039 dex,'
+      '  a3/a2 = 0.601 +- 0.025 dex')
+print('above is the %s variant'
+      % ('raw-flux (_linear)' if mtf.default_variant() else 'arcsinh'))
 """)
 
 code(r"""
@@ -394,8 +411,10 @@ for c, lab in [('a2a1', 'a2/a1'), ('a3a2', 'a3/a2')]:
                      dchi2_vs_zero=dchi2, p=stats.chi2.sf(dchi2, 1)))
 print(pd.DataFrame(rows).to_string(index=False))
 print()
-print('report: a2/a1 0.120 dex [0.084, 0.161] p=0.006 ;'
+print('report (arcsinh run): a2/a1 0.120 dex [0.084, 0.161] p=0.006 ;'
       ' a3/a2 0.096 dex [0.076, 0.119] p=6e-06')
+print('above is the %s variant'
+      % ('raw-flux (_linear)' if mtf.default_variant() else 'arcsinh'))
 """)
 
 md(r"""

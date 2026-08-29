@@ -12,6 +12,15 @@ Tier A covers every headline result in the report, because the fit tables and
 the per-window jackknife JSON are tracked. Start there; only re-run tier B if
 you are changing the fitting itself.
 
+> **Preprocessing.** Every literal number in this document verifies against the
+> **arcsinh** tables — the unsuffixed files, which are what `PROJECT_REPORT.md`
+> tabulates. The pipeline default is now raw flux (`_linear` suffix), so a bare
+> `python analysis/make_*.py` builds the raw-flux variant and will *not*
+> reproduce the figures below; the commands here pass the arcsinh variant
+> explicitly where it matters. For the raw-flux numbers and how the conclusions
+> compare, see "The arcsinh transform, and the raw-flux rerun" in
+> `README_FORK.md`.
+
 ## Environment
 
 Python 3.13, `numpy scipy pandas matplotlib h5py`. Versions used:
@@ -88,10 +97,13 @@ np.median(predicted_spread(inc, 0.281, 0.596, 0, 0))          # 0.175 dex
 sensitivity_to_3d_scatter(inc, 0.281, 0.596, b2b1, se_b2b1)   # 2-sigma at 0.28
 ```
 
-Regenerate both deliverable figures:
+Regenerate both deliverable figures. `CASA_ARCSINH_UNITS=1` selects the arcsinh
+variant these numbers describe; without it you get the raw-flux default, whose
+outputs carry a `_linear` suffix:
 
 ```bash
-python analysis/make_tier_figures.py     # -> results/figures/
+CASA_ARCSINH_UNITS=1 python analysis/make_tier_figures.py   # -> results/figures/
+CASA_ARCSINH_UNITS=1 python analysis/make_science_figure.py # -> the print figure
 ```
 
 ## Tier B — re-run the fits from the images
@@ -218,8 +230,8 @@ result at the other converged blocking, not a failed reproduction. Pass `--k 3`
 to reproduce the report's tabulated values exactly:
 
 ```bash
-python analysis/make_tier_figures.py --k 3   # -> 0.2854 / 0.6008
-python analysis/make_tier_figures.py         # -> 0.2811 / 0.5958  (k=4 default)
+CASA_ARCSINH_UNITS=1 python analysis/make_tier_figures.py --k 3  # -> 0.2854 / 0.6008
+CASA_ARCSINH_UNITS=1 python analysis/make_tier_figures.py        # -> 0.2811 / 0.5958  (k=4)
 ```
 
 The 1.5% spread between them is the blocking systematic, and it is smaller than

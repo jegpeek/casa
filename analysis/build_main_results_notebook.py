@@ -92,6 +92,12 @@ import os
 import numpy as np
 import pandas as pd
 
+# The numbers quoted in this notebook's prose are the arcsinh ones, so pin the
+# preprocessing variant rather than following the repo default.  Must precede
+# the mtf import: the variant is read at import time.
+os.environ.pop('CASA_LINEAR_UNITS', None)
+os.environ['CASA_ARCSINH_UNITS'] = '1'
+
 import make_tier_figures as mtf     # loads the fit tables, draws the figures
 import shape_center as sc           # the shape-plane estimators
 
@@ -231,7 +237,10 @@ from the `mode == '2d'` rows, not the 3D fit's prediction.
 
 code(r"""
 tag = 'r%g_s%d_k%d' % (mtf.RCUT, mtf.STRIDE, K)
-raw = pd.read_csv('results/singleband_powerlaw_%s.csv' % tag)
+# Same variant as mtf.load above -- the 2D rows live in the same table, and
+# mixing preprocessings between the 3D and 2D fits would be a silent error.
+raw = pd.read_csv('results/singleband_powerlaw_%s%s.csv'
+                  % (tag, mtf.default_variant()))
 meas2d = raw[(raw['mode'] == '2d') & (raw.profile == 'powerlaw')]
 
 j = q4[['row', 'col', 'incl']].merge(

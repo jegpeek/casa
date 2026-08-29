@@ -74,7 +74,8 @@ def _load(stride, band_dex, kind='2d', profile=None):
     import scale_split as ss
     if profile is None:
         profile = ss.CANONICAL_PROFILE
-    suffix = ss.profile_suffix(profile)
+    import preprocessing_mode as pm
+    suffix = ss.profile_suffix(profile) + pm.variant_suffix()
     sub = ('scale_profile_2d_d%g_s%d%s' % (band_dex, stride, suffix)
            if kind == '2d'
            else 'scale_profile_d%g_s%d%s' % (band_dex, stride, suffix))
@@ -210,7 +211,9 @@ def main():
     band_rows, slope_rows = summarize(stride, band_dex, profile)
     # The result filenames carry the profile for the same reason the data
     # trees do: an unsuffixed name is a claim that these are canonical fits.
-    tag = f'd{band_dex:g}_s{stride}{ss.profile_suffix(profile)}'
+    import preprocessing_mode as pm
+    tag = (f'd{band_dex:g}_s{stride}{ss.profile_suffix(profile)}'
+           f'{pm.variant_suffix()}')
     os.makedirs(f'{_ROOT}/results', exist_ok=True)
     _write(band_rows, f'{_ROOT}/results/scale_profile_2d_{tag}_bands.csv')
     _write(slope_rows, f'{_ROOT}/results/scale_profile_2d_{tag}_slopes.csv')

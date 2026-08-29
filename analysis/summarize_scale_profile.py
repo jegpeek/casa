@@ -101,7 +101,8 @@ def summarize(stride=2, band_dex=0.6, data_dir=None,
     """
     if data_dir is None:
         data_dir = os.path.join(_ROOT, 'data')
-    suffix = ss.profile_suffix(profile)
+    import preprocessing_mode as pm
+    suffix = ss.profile_suffix(profile) + pm.variant_suffix()
     pat = os.path.join(data_dir,
                        f'scale_profile_d{band_dex:g}_s{stride}{suffix}',
                        '*.json')
@@ -180,7 +181,11 @@ def main():
     band_dex = float(sys.argv[2]) if len(sys.argv) > 2 else 0.6
     profile = sys.argv[3] if len(sys.argv) > 3 else ss.CANONICAL_PROFILE
     band_rows, slope_rows = summarize(stride, band_dex, profile=profile)
-    tag = f'd{band_dex:g}_s{stride}{ss.profile_suffix(profile)}'
+    # The preprocessing variant is part of the tag, so a raw-flux summary can
+    # never overwrite the arcsinh table the committed figures were built from.
+    import preprocessing_mode as pm
+    tag = (f'd{band_dex:g}_s{stride}{ss.profile_suffix(profile)}'
+           f'{pm.variant_suffix()}')
     _write(band_rows, f'{_ROOT}/results/scale_profile_{tag}_bands.csv')
     _write(slope_rows, f'{_ROOT}/results/scale_profile_{tag}_slopes.csv')
 

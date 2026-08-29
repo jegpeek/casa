@@ -105,27 +105,50 @@ makes "how much does the transform shape the result?" a real referee question,
 so the whole 115-window pipeline was rerun in raw flux units with no transform
 and no floor, changing nothing else.
 
-The preprocessing is selected by one environment variable, `CASA_LINEAR_UNITS`,
-read in `analysis/scale_split.py`. It is deliberately not a per-script flag: it
-has to be the same for the fits, the SNR audit and the figures, and every output
-path picks up a `_linear` suffix from it so the two variants cannot overwrite
-each other.
+**Raw flux is now the default.** Every driver reads `COMPUTE_KW` from
+`analysis/scale_split.py`, which selects raw flux unless `CASA_ARCSINH_UNITS=1`
+is set (the legacy `CASA_LINEAR_UNITS=0` does the same; if both are set, arcsinh
+wins). It is deliberately one module-level switch rather than a per-script flag:
+it has to be identical for the fits, the SNR audit and the figures, and the
+drivers reach `COMPUTE_KW` through module state inside `spawn`-ed pool workers,
+which would not observe a mutation made in the parent process.
+
+**Filenames keep the `_linear` suffix even though raw flux is the default.** The
+suffix was *not* inverted, deliberately: unsuffixed committed files remain the
+arcsinh run they have always been, so no tracked path silently changes meaning
+between commits. Consumers select the default through
+`make_tier_figures.default_variant()` rather than by hard-coding a suffix, so
+"which variant is default" lives in exactly one function.
 
 ```bash
 export PYTHONPATH="$PWD:$PWD/analysis"
-export CASA_LINEAR_UNITS=1
+# no env var needed -- raw flux is the default
 
-# refit (resumable: one JSON per window, existing files are skipped)
-python analysis/singleband_powerlaw.py --rcut 0.1 --k 4 --procs 6
+# refit (resumable: one JSON per window, existing files are skipped).
+# --windows is REQUIRED; the k=4 run uses all 115 windows.
+python analysis/singleband_powerlaw.py --rcut 0.1 --k 4 --procs 6 \
+       --windows handoff/all115_windows.json
 # re-tier: the SNR table must move WITH the fit table (see below)
 python analysis/noise_audit_windows.py
-# figures: --variant defaults from CASA_LINEAR_UNITS
+# figures: --variant defaults to '_linear' via default_variant()
 python analysis/make_tier_figures.py --k 4
+python analysis/make_science_figure.py
 
-# the comparison reads BOTH variants' tables, so run it unset
-unset CASA_LINEAR_UNITS
+# the comparison reads BOTH variants' tables, so it takes no env var
 python analysis/compare_linear_vs_arcsinh.py
 python analysis/fig_linear_vs_arcsinh.py
+
+# to rebuild the ORIGINAL arcsinh outputs (unsuffixed filenames):
+CASA_ARCSINH_UNITS=1 python analysis/make_tier_figures.py --k 4
+```
+
+The k=3 top-quartile table used by the two results notebooks needs its own
+refit, because the top-SNR quartile is itself re-tiered under raw flux — one
+window swaps in — so the window list is not the published `q4_windows.json`:
+
+```bash
+python analysis/singleband_powerlaw.py --k 3 --procs 6 \
+       --windows handoff/q4_windows_linear.json
 ```
 
 Thread caps matter for the refit: each worker spawns its own BLAS threads, so

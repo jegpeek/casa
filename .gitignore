@@ -15,6 +15,15 @@ data/scale_profile_2d_d0.6_s2_weibull/
 data/scale_split_s2/
 data/scale_split_logmid_s2/
 data/singleband_*/
+# Raw-flux (_linear) counterparts of the caches above.  Listed explicitly, like
+# the arcsinh ones, so a new driver/settings combination has to be added here
+# deliberately rather than being swept up by a wildcard.
+data/bs_k4_B100_s2_linear/
+data/scale_profile_d0.6_s2_linear/
+data/scale_profile_d0.6_s2_weibull_linear/
+data/scale_profile_2d_d0.6_s2_linear/
+data/scale_split_s2_linear/
+data/scale_split_logmid_s2_linear/
 __pycache__/
 *.pyc
 *.log

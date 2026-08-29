@@ -115,6 +115,13 @@ ROOT = os.path.dirname(os.getcwd()) if os.path.basename(os.getcwd()) == \
     'notebooks' else os.getcwd()
 sys.path[:0] = [ROOT, os.path.join(ROOT, 'analysis')]
 
+# This notebook reproduces the published arcsinh numbers, so it pins the
+# preprocessing variant instead of following the repo default.  Set here, in the
+# first cell, because the variant is read when make_tier_figures is imported --
+# and this notebook imports (and reloads) it in several later cells.
+os.environ.pop('CASA_LINEAR_UNITS', None)
+os.environ['CASA_ARCSINH_UNITS'] = '1'
+
 # ---- knobs ---------------------------------------------------------------
 RUN_LEVEL = 'full'      # 'walkthrough' | 'figures' | 'full'
 PROCS = 6               # worker processes for the window pools
@@ -129,6 +136,16 @@ LEVEL = LEVELS.index(RUN_LEVEL)
 # Everything this notebook computes lands here, mirroring the repo layout.
 # The tracked results/ and data/ trees are never written to, so a rerun can be
 # diffed against the published numbers.
+#
+# DELIBERATELY PINNED to the arcsinh preprocessing (unsuffixed filenames), even
+# though raw flux is now the pipeline default.  This notebook's purpose is to
+# reproduce the ORIGINAL published tables from the raw data and diff against
+# them; following the default would make it diff a raw-flux rerun against
+# arcsinh references and report spurious mismatches.  Reproducing the raw-flux
+# tables instead is a separate exercise -- set CASA_ARCSINH_UNITS accordingly
+# and retarget the reference paths together, never one without the other.
+os.environ.setdefault('CASA_ARCSINH_UNITS', '1')
+
 RERUN = os.path.join(ROOT, 'rerun')
 os.makedirs(os.path.join(RERUN, 'results'), exist_ok=True)
 os.makedirs(os.path.join(RERUN, 'data'), exist_ok=True)

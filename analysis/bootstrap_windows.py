@@ -16,6 +16,25 @@ are ~360 MB at k=3 and cannot be shared between processes (macOS spawns rather
 than forks), so each worker builds one set and reuses it for all B replicates.
 Peak RSS is ~1 GB per worker at k=3; do not exceed 8 workers on a 16 GB machine.
 
+MEMORY SCALES WITH k AND THE k=3 WORKER GUIDANCE ABOVE DOES NOT TRANSFER.  The
+number of block pairs grows as k^4 while each pair's lag footprint shrinks only
+as ~1/k^2, so the retained arrays grow roughly as k^2: measured Nb+Xb is 0.36 GB
+at k=3 (matching the ~360 MB above) and 0.69 GB at k=4, for a peak RSS of
+~1.2 GB per worker at k=4.
+
+THROUGHPUT HERE IS MEMORY-BOUND, NOT CPU-BOUND, and oversubscribing makes it
+dramatically SLOWER rather than merely not faster.  Measured on the 16 GB
+machine at k=4, B=100:
+
+    5 workers -> 14.5 min/window   (free memory ~0, swapping)
+    3 workers ->  4.5 min/window   (~3x faster with FEWER workers)
+
+Capping BLAS threads is not the fix and does not measurably matter (60.5 s vs
+59.2 s for one window with threads uncapped vs capped at 2).  Use 3 workers for
+k=4 on a 16 GB machine: ~2.2 h for 29 windows.  Runs are resumable (a window
+whose JSON exists is skipped) and seeds are position-derived, so an interrupted
+run can simply be relaunched with fewer workers without losing or changing work.
+
 Usage:  python analysis/bootstrap_windows.py [n_boot] [n_workers] [stride] [windows] [k]
           n_boot    number of bootstrap replicates per window (default 100)
           n_workers worker processes (default 6)
@@ -48,9 +67,16 @@ READ_KW = dict(edge_mask_radius=50, min_coverage=0.25)
 # their defaults, and this one leaves max_nfev / weighting at theirs.  Verified
 # empirically -- the central fit for r2800_c2000 reproduces the completed
 # jackknife run to 4 decimals in both axis ratios.  Keep them in sync.
+# Preprocessing (background / arcsinh_scale) is NOT hard-coded here: it is
+# imported from scale_split so this driver cannot disagree with the shape tables
+# about which variant is running.  It used to be a third independent copy of
+# `background=0.03, arcsinh_scale=0.03` carrying a "keep them in sync" comment,
+# which is exactly the drift this indirection removes -- a mismatch would tier
+# raw-flux fits by arcsinh SNR with no error raised.
+import scale_split as _ss
+
 COMPUTE_KW = dict(clip_percentiles=(0.002, 0.998), fill_nans=False,
-                  assume_stationary=True,
-                  background=0.03, arcsinh_scale=0.03, subtract_mean='global')
+                  subtract_mean='global', **_ss.COMPUTE_KW)
 # precompute_blocks implements the stationary formula unconditionally (it is the
 # only mode the profiles use), so it takes no assume_stationary argument.
 PRE_KW = {k: v for k, v in COMPUTE_KW.items() if k != 'assume_stationary'}
@@ -135,12 +161,19 @@ def main():
     which     = sys.argv[4] if len(sys.argv) > 4 else 'q4'
     k         = int(sys.argv[5]) if len(sys.argv) > 5 else 3
 
-    win_file = {'q4': 'handoff/q4_windows.json',
-                'all': 'handoff/all115_windows.json'}[which]
+    import preprocessing_mode as pm
+    win_file = pm.windows_file(which)
     with open(win_file) as fh:
         wins = json.load(fh)['specs']       # list of [row, col, size]
+    print('windows: %s (%d)' % (win_file, len(wins)), flush=True)
 
-    out_dir = f'data/bs_k{k}_B{n_boot}_s{stride}'
+    # The variant belongs in the path: preprocessing changes the fitted values,
+    # so a raw-flux run must not land in the directory an arcsinh run wrote.
+    # Same convention as the tables -- raw flux carries `_linear`, unsuffixed
+    # stays the arcsinh run it has always been, so no existing path changes
+    # meaning.
+    import preprocessing_mode as pm
+    out_dir = f'data/bs_k{k}_B{n_boot}_s{stride}{pm.variant_suffix()}'
     os.makedirs(out_dir, exist_ok=True)
 
     # Per-window seeds derived from position: reproducible, and independent of

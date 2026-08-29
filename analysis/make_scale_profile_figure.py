@@ -16,6 +16,7 @@ python analysis/make_scale_profile_figure.py [--bands PATH] [--out PATH]
 """
 import argparse
 import os
+import sys
 
 import matplotlib
 matplotlib.use('Agg')
@@ -168,12 +169,18 @@ def make(bands, summary, out):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
+    # All three defaults follow the preprocessing variant together: plotting an
+    # arcsinh table into a filename that does not say so is the failure mode
+    # this guards against.  Pass paths explicitly to cross a variant on purpose.
+    sys.path.insert(0, os.path.join(_ROOT, 'analysis'))
+    import preprocessing_mode as pm
+    _v = pm.variant_suffix()
     ap.add_argument('--bands', default=os.path.join(
-        _ROOT, 'results', 'scale_profile_d0.6_s2_bands.csv'))
+        _ROOT, 'results', 'scale_profile_d0.6_s2%s_bands.csv' % _v))
     ap.add_argument('--summary', default=os.path.join(
-        _ROOT, 'results', 'scale_profile_slopes_summary.csv'))
+        _ROOT, 'results', 'scale_profile_slopes_summary%s.csv' % _v))
     ap.add_argument('--out', default=os.path.join(
-        _ROOT, 'results', 'scale_profile_ratios.png'))
+        _ROOT, 'results', 'scale_profile_ratios%s.png' % _v))
     a = ap.parse_args()
     make(pd.read_csv(a.bands), pd.read_csv(a.summary), a.out)
     print('wrote %s' % a.out)

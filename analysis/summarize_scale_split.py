@@ -81,7 +81,10 @@ def _scalars(rec):
 
 def summarize(stride=2, mode='median'):
     suffix = '' if mode == 'median' else f'_{mode}'
-    files = sorted(glob.glob(f'{_ROOT}/data/scale_split{suffix}_s{stride}/*.json'))
+    sys.path.insert(0, f'{_ROOT}/analysis')
+    import preprocessing_mode as pm
+    files = sorted(glob.glob(
+        f'{_ROOT}/data/scale_split{suffix}_s{stride}{pm.variant_suffix()}/*.json'))
     rows = []
     for fn in files:
         d = json.load(open(fn))
@@ -135,8 +138,13 @@ def main():
     stride = int(sys.argv[1]) if len(sys.argv) > 1 else 2
     mode = sys.argv[2] if len(sys.argv) > 2 else 'median'
     suffix = '' if mode == 'median' else f'_{mode}'
+    # The preprocessing variant is part of the output name, so a raw-flux
+    # summary cannot overwrite the arcsinh table the committed figures use.
+    sys.path.insert(0, f'{_ROOT}/analysis')
+    import preprocessing_mode as pm
     out = (sys.argv[3] if len(sys.argv) > 3
-           else f'{_ROOT}/results/scale_split{suffix}_s{stride}.csv')
+           else f'{_ROOT}/results/scale_split{suffix}_s{stride}'
+                f'{pm.variant_suffix()}.csv')
     rows = summarize(stride, mode)
     if not rows:
         print('no usable windows'); return

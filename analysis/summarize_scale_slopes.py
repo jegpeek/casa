@@ -31,6 +31,7 @@ python analysis/summarize_scale_slopes.py [--bands PATH] [--out PATH] [--check]
 """
 import argparse
 import os
+import sys
 
 import numpy as np
 import pandas as pd
@@ -95,10 +96,15 @@ def summarize(bands):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
+    # Defaults follow the preprocessing variant so --check compares like with
+    # like; pass --bands/--out explicitly to cross a variant deliberately.
+    sys.path.insert(0, os.path.join(_ROOT, 'analysis'))
+    import preprocessing_mode as pm
+    _v = pm.variant_suffix()
     ap.add_argument('--bands', default=os.path.join(
-        _ROOT, 'results', 'scale_profile_d0.6_s2_bands.csv'))
+        _ROOT, 'results', 'scale_profile_d0.6_s2%s_bands.csv' % _v))
     ap.add_argument('--out', default=os.path.join(
-        _ROOT, 'results', 'scale_profile_slopes_summary.csv'))
+        _ROOT, 'results', 'scale_profile_slopes_summary%s.csv' % _v))
     ap.add_argument('--check', action='store_true',
                     help='compare against --out instead of overwriting it')
     a = ap.parse_args()

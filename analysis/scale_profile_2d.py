@@ -186,10 +186,12 @@ def main():
     if profile not in ss.BAND_PROFILES:
         raise SystemExit('profile must be one of %s' % sorted(ss.BAND_PROFILES))
 
-    wl = json.load(open(f'{_ROOT}/handoff/{which}_windows.json'))
+    import preprocessing_mode as pm
+    wl = json.load(open(pm.windows_file(which, _ROOT)))
     specs_raw = wl['specs'] if isinstance(wl, dict) else wl
     suffix = ss.profile_suffix(profile)
-    out_dir = f'{_ROOT}/data/scale_profile_2d_d{band_dex:g}_s{stride}{suffix}'
+    out_dir = (f'{_ROOT}/data/scale_profile_2d_d{band_dex:g}_s{stride}{suffix}'
+               f'{pm.variant_suffix()}')
     os.makedirs(out_dir, exist_ok=True)
     specs = [(int(r), int(c), int(s), stride, out_dir, band_dex, profile)
              for r, c, s in specs_raw]

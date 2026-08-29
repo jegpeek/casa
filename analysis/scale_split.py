@@ -68,16 +68,17 @@ import structure_function as sf
 
 K = 2  # 2x2 image blocks -> 4 delete-one-block jackknife samples
 
-# Identical settings to jackknife_noise.py / bootstrap_windows.py.  A mismatch
-# here would make the full-band control fit disagree with the committed runs,
-# which is the canary that these have drifted apart.
+# The ORIGINAL preprocessing, matching jackknife_noise.py / bootstrap_windows.py
+# and every result committed before the systematics rerun.  No longer the default
+# (see below), but kept as the settings any pre-rerun table must be compared
+# against: a mismatch here would make the full-band control fit disagree with
+# those runs, which is the canary that they have drifted apart.
 COMPUTE_KW = dict(background=0.03, arcsinh_scale=0.03, assume_stationary=True)
 
-# ---------------------------------------------------------------- linear mode
-# Setting CASA_LINEAR_UNITS=1 in the environment switches the whole pipeline to
-# raw flux units: no additive floor removed, no arcsinh compression.  Every
-# driver reads COMPUTE_KW from this module, so the override lands in all of them
-# at once and cannot drift between them.
+# ------------------------------------------------- preprocessing: RAW FLUX now
+# The pipeline runs in raw flux units by default: no additive floor removed, no
+# arcsinh compression.  Every driver reads COMPUTE_KW from this module, so the
+# choice lands in all of them at once and cannot drift between them.
 #
 # NB this is deliberately ONE switch and not two.  With arcsinh_scale=None the
 # transform chain reduces to (f - background), and S2 is a function of pixel
@@ -93,9 +94,19 @@ COMPUTE_KW = dict(background=0.03, arcsinh_scale=0.03, assume_stationary=True)
 # this module and would not see a mutation made in the parent process.
 LINEAR_COMPUTE_KW = dict(background=0.0, arcsinh_scale=None,
                          assume_stationary=True)
-LINEAR_UNITS = os.environ.get('CASA_LINEAR_UNITS', '') not in ('', '0')
-if LINEAR_UNITS:
-    COMPUTE_KW = dict(LINEAR_COMPUTE_KW)
+# COMPUTE_KW still holds the arcsinh settings at this point; capture them under
+# an explicit name so the original preprocessing stays reachable by name.
+ARCSINH_COMPUTE_KW = dict(COMPUTE_KW)
+
+# RAW FLUX IS THE DEFAULT as of the systematics rerun.  The switch is resolved
+# in analysis/preprocessing_mode.py so that this module and the figure layer
+# (make_tier_figures.default_variant) cannot disagree about which variant is
+# running -- see that module's docstring.  CASA_ARCSINH_UNITS=1 restores the
+# original arcsinh preprocessing.
+import preprocessing_mode as _pm
+
+LINEAR_UNITS = _pm.use_linear_units()
+COMPUTE_KW = dict(LINEAR_COMPUTE_KW) if LINEAR_UNITS else dict(ARCSINH_COMPUTE_KW)
 FIT_KW = dict(max_nfev=None, weighting='1/r', min_n_fraction=0.1)
 READ_KW = dict(edge_mask_radius=50, min_coverage=0.25)
 INNER_UV = 200
@@ -280,10 +291,14 @@ def main():
     which = sys.argv[3] if len(sys.argv) > 3 else 'q4'
     mode = sys.argv[4] if len(sys.argv) > 4 else 'median'
 
-    wl = json.load(open(f'{_ROOT}/handoff/{which}_windows.json'))
+    # Both the window list and the output tree are variant-specific: the q4 list
+    # is SNR-selected, and a raw-flux run must not overwrite the (untracked, so
+    # unrecoverable) arcsinh cache that the committed tables were built from.
+    wl = json.load(open(_pm.windows_file(which, _ROOT)))
     specs_raw = wl['specs'] if isinstance(wl, dict) else wl
     suffix = '' if mode == 'median' else f'_{mode}'
-    out_dir = f'{_ROOT}/data/scale_split{suffix}_s{stride}'
+    out_dir = (f'{_ROOT}/data/scale_split{suffix}_s{stride}'
+               f'{_pm.variant_suffix()}')
     os.makedirs(out_dir, exist_ok=True)
     specs = [(int(r), int(c), int(s), stride, out_dir, mode) for r, c, s in specs_raw]
 

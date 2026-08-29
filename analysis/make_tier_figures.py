@@ -42,16 +42,33 @@ def _relabel_tiers(d):
         TIERS[i] = (tier, col, new, sz, al)
 
 
-def load(k=K, variant=''):
+def default_variant():
+    """Filename suffix for the current default preprocessing.
+
+    RAW FLUX is the default, so this is normally '_linear'.  The suffix is
+    retained rather than inverted (i.e. raw-flux files are NOT the unsuffixed
+    ones) so that no committed path silently changes meaning: unsuffixed files
+    remain the arcsinh run they have always been, and consumers move to the
+    suffixed default explicitly.  Set CASA_ARCSINH_UNITS=1 -- or the legacy
+    CASA_LINEAR_UNITS=0 -- to select arcsinh.
+    """
+    import preprocessing_mode as pm
+    return pm.variant_suffix()
+
+
+def load(k=K, variant=None):
     """Fit table joined to SNR tier, one row per window (3D power law).
 
-    `variant` selects the preprocessing: '' is the published arcsinh run,
-    '_linear' the raw-flux run written under CASA_LINEAR_UNITS=1.  BOTH inputs
-    move together -- the fit table and the SNR tiering must come from the same
-    preprocessing, because `snr` is an S2 plateau-over-floor ratio and the
-    arcsinh compresses the plateau relative to the floor.  Mixing them would
-    tier linear-units fits by arcsinh-units SNR.
+    `variant` selects the preprocessing: '_linear' is the raw-flux run and the
+    DEFAULT; '' is the original arcsinh run.  Passing None resolves via
+    `default_variant()`, so callers follow the pipeline-wide default without
+    each hard-coding a suffix.  BOTH inputs move together -- the fit table and
+    the SNR tiering must come from the same preprocessing, because `snr` is an
+    S2 plateau-over-floor ratio and the arcsinh compresses the plateau relative
+    to the floor.  Mixing them would tier linear-units fits by arcsinh SNR.
     """
+    if variant is None:
+        variant = default_variant()
     tag = 'r%g_s%d' % (RCUT, STRIDE)
     if k != 2:
         tag += '_k%d' % k
@@ -343,11 +360,15 @@ def apply_figure_style(sizes=(8, 7, 6)):
         'legend.fontsize': sizes[2],
     })
 
-def main(k=K, floor=FLOOR, outdir=None, variant=''):
+def main(k=K, floor=FLOOR, outdir=None, variant=None):
     import matplotlib
     matplotlib.use('Agg')
     outdir = outdir or os.path.join(ROOT, 'results', 'figures')
     os.makedirs(outdir, exist_ok=True)
+    # Resolve BEFORE use: `variant` also lands in the output filenames below,
+    # where a None would be formatted as the literal string 'None'.
+    if variant is None:
+        variant = default_variant()
 
     apply_figure_style()
 
@@ -435,8 +456,7 @@ if __name__ == '__main__':
     # Default from the same env switch that drives the fits and the SNR audit,
     # so CASA_LINEAR_UNITS=1 selects the preprocessing for the WHOLE pipeline
     # and the figures cannot silently be built from the other variant's tables.
-    _lin = os.environ.get('CASA_LINEAR_UNITS', '') not in ('', '0')
-    ap.add_argument('--variant', default='_linear' if _lin else '',
-                    help="'' = published arcsinh run, '_linear' = raw flux")
+    ap.add_argument('--variant', default=None,
+                    help="'_linear' = raw flux (default), '' = arcsinh run")
     a = ap.parse_args()
     main(k=a.k, floor=a.floor, outdir=a.outdir, variant=a.variant)

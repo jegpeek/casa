@@ -125,16 +125,32 @@ def ratio_ticks(rng):
     return cand[(cand >= rng[0]) & (cand <= rng[1])]
 
 
-def shape_plane_data(k=mtf.K, floor=mtf.FLOOR):
+def shape_plane_data(k=mtf.K, floor=mtf.FLOOR, variant=None):
     """Everything the figure and its caption need, computed once.
 
-    Returns a dict.  Both samples are carried explicitly: `fitted` is the full
-    usable top quartile that the ML center and scatter are estimated from, and
-    `drawn` is what survives the axis floor.  Coverage is measured on `drawn`,
-    because coverage is a claim about points a reader can SEE inside the
-    contour.
+    Returns a dict.  Three top-quartile counts are carried explicitly and are
+    NOT interchangeable: `n_q4_fit` is the full usable quartile the ML center
+    and scatter are estimated from; `n_q4_cov` is that quartile minus collapsed
+    (degenerate) fits, and is the coverage denominator; the drawn count is
+    `n_q4_cov` minus whatever the display floor pushes off-scale.
+
+    Coverage is deliberately measured on the non-degenerate sample rather than
+    on the drawn sample, so that retuning the display floor cannot move a
+    quoted statistic (the project's standing rule).  It is therefore NOT a
+    tally of markers a reader can see inside the contour: under the raw-flux
+    variant one non-degenerate window sits below the floor and is undrawn but
+    still counted.  The caption states the count and denominator explicitly,
+    and names the off-scale windows, so the difference is accountable.
+
+    `variant` selects the preprocessing exactly as in `mtf.load`: '_linear' is
+    the raw-flux run and the default, '' the original arcsinh run; None resolves
+    via `mtf.default_variant()`.  Every number in the caption is derived from
+    this table, so the caption follows the variant automatically and cannot
+    drift from the figure it describes.
     """
-    raw = mtf.load(k=k)[0]
+    if variant is None:
+        variant = mtf.default_variant()
+    raw = mtf.load(k=k, variant=variant)[0]
     d_all = raw[mtf.usable(raw)]
     n_fitted, n_usable = int(len(raw)), int(len(d_all))
 
@@ -159,13 +175,14 @@ def shape_plane_data(k=mtf.K, floor=mtf.FLOOR):
                                                    q4_fit.se_a2a1.values)
     mu32, s32, _, me32 = mtf.ml_center_and_scatter(q4_fit.a3a2.values,
                                                    q4_fit.se_a3a2.values)
-    # Coverage is measured on the FITTED top quartile, the same sample the
-    # ellipses are estimated from, so a retune of the display floor cannot move
-    # a quoted statistic (the project's standing rule).  The caption therefore
-    # reports the count and the denominator explicitly rather than a bare
-    # percentage: a reader tallying markers inside the contour must find the
-    # stated numerator, and the one window the floor pushes off-scale lies
-    # outside both contours in any case.
+    # Coverage denominator: the top quartile MINUS collapsed fits (`d` is the
+    # degen-filtered table, not the floor-clipped one), so a retune of the
+    # display floor cannot move a quoted statistic -- the project's standing
+    # rule.  Note this is one window short of `q4_fit` under raw flux, where a
+    # collapsed fit is dropped here but kept in the likelihood above.  The
+    # caption reports count and denominator explicitly rather than a bare
+    # percentage, and names the off-scale windows, so a referee tallying
+    # markers can account for the difference.
     q4_cov = d[d.tier == 'q4']
 
     def inside(rx, ry):
@@ -446,32 +463,38 @@ def caption(S):
         'Of %d windows fitted, %d returned a usable fit and %d of those '
         'converged to a non-degenerate ellipsoid; axes are additionally clipped '
         'below %.2f, where the ratios are not trusted, leaving %d drawn. '
-        'Legend counts follow the drawing; the maximum-likelihood shape and the '
-        'coverage fractions above use every usable window in the highest '
-        'quartile (%d).%s\n'
+        'Legend counts follow the drawing; the maximum-likelihood shape uses '
+        'every usable window in the highest quartile (%d), while the coverage '
+        'fractions above are measured on the %d of those that converged to a '
+        'non-degenerate ellipsoid.%s\n'
         % (S['k'], snr_txt, c21, c32, me21, me32,
            S['cov_meas'][0], S['cov_meas'][1], S['cov_meas'][2], EXPECTED,
            s21, s32,
            S['cov_tot'][0], S['cov_tot'][1], S['cov_tot'][2],
            S['n_fitted'], S['n_usable'], len(S['d']), S['floor'], n_draw,
-           S['n_q4_fit'], off))
+           S['n_q4_fit'], S['n_q4_cov'], off))
 
 
-def main(k=mtf.K, floor=mtf.FLOOR, ncol=2, outdir=None):
+def main(k=mtf.K, floor=mtf.FLOOR, ncol=2, outdir=None, variant=None):
     import matplotlib
     matplotlib.use('Agg')
     outdir = outdir or os.path.join(ROOT, 'results', 'figures')
     os.makedirs(outdir, exist_ok=True)
+    # Resolve BEFORE use: `variant` lands in the output filenames below.
+    if variant is None:
+        variant = mtf.default_variant()
 
     apply_science_style()
-    S = shape_plane_data(k=k, floor=floor)
+    S = shape_plane_data(k=k, floor=floor, variant=variant)
     fig, ax, leg = fig_shape_plane_science(S, ncol=ncol)
 
-    base = os.path.join(outdir, 'shape_plane_science')
+    # The variant rides on the filename so the arcsinh and raw-flux versions of
+    # the paper figure (and their captions) cannot overwrite each other.
+    base = os.path.join(outdir, 'shape_plane_science' + variant)
     # PDF is the deliverable (Science wants vector); PNG is for screen checks.
     fig.savefig(base + '.pdf')
     fig.savefig(base + '.png', dpi=600)
-    cap = os.path.join(outdir, 'shape_plane_science_caption.txt')
+    cap = os.path.join(outdir, 'shape_plane_science%s_caption.txt' % variant)
     with open(cap, 'w') as fh:
         fh.write(caption(S))
     return base + '.pdf', base + '.png', cap, fig, S
@@ -485,6 +508,11 @@ if __name__ == '__main__':
     ap.add_argument('--ncol', type=int, default=2, choices=(1, 2, 3),
                     help='Science column width: 5.7 / 12.1 / 18.4 cm')
     ap.add_argument('--outdir', default=None)
+    # Follows the pipeline-wide default (raw flux) via mtf.default_variant();
+    # CASA_ARCSINH_UNITS=1 selects arcsinh.  See analysis/scale_split.py.
+    ap.add_argument('--variant', default=None,
+                    help="'_linear' = raw flux (default), '' = arcsinh run")
     a = ap.parse_args()
-    for p in main(k=a.k, floor=a.floor, ncol=a.ncol, outdir=a.outdir)[:3]:
+    for p in main(k=a.k, floor=a.floor, ncol=a.ncol, outdir=a.outdir,
+                  variant=a.variant)[:3]:
         print(os.path.relpath(p, ROOT))
