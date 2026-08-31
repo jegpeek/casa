@@ -51,6 +51,9 @@ _GEOM = ['s11', 's22', 's33', 'l12', 'l13', 'l23']
 NCOL_PAIRS = 4          # 4 (image,curve) pairs per row -> 8 axis columns
 R_LO_SAMPLED = 0.0096
 R_HI_SAMPLED = 0.5007
+# in-plane physical scale (ly per pixel), from the U grid spacing
+_Ug = np.load(os.path.join(_ROOT, 'data', 'U_grid.npy'), mmap_mode='r')
+LY_PER_PIX = float(_Ug[0, 1] - _Ug[0, 0])
 
 
 def phys_profile(row, col, central, nbin=14, rmax=R_HI_SAMPLED, rmin=8e-3):
@@ -130,6 +133,14 @@ def main(outdir='results/figures', tier='q4'):
         for s in axi.spines.values():
             s.set_visible(True); s.set_color(col); s.set_linewidth(2.2)
         axi.set_title('%d,%d' % (rec.row, rec.col), fontsize=6.5, pad=1.5)
+        # ---- 0.1 ly scale bar (lower-left) ----
+        npx = img.shape[1]                       # window width in px (400)
+        bar_px = 0.1 / LY_PER_PIX                # 0.1 ly in pixels
+        x0, y0 = 0.06 * npx, 0.075 * npx         # bar left end, in px
+        axi.plot([x0, x0 + bar_px], [y0, y0], '-', color='white', lw=2.0,
+                 solid_capstyle='butt', zorder=5)
+        axi.text(x0 + bar_px / 2.0, y0 + 0.035 * npx, '0.1 ly',
+                 color='white', fontsize=5.5, ha='center', va='bottom', zorder=5)
 
         # ---- profile ----
         axp = fig.add_subplot(gs[gr, gc + 1])
