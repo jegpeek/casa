@@ -1,16 +1,21 @@
-"""3D structure function averaged over a user-defined interior region.
+"""3D structure function over a user-defined interior region.
 
-Reads a polygon (data/interior_region.json, written by pick_region.py), tiles
-its bounding box into 400-px blocks (the normal window size), masks each block
-to the polygon (out-of-region pixels -> NaN), runs compute_s2 on all 5 epochs
-(the 5 W-slices), and accumulates the summed squared-differences and pair
-counts per lag across blocks.  Because compute_s2 stores s2 = dsq / N per lag,
-the accumulation is  sum(s2 * N) / sum(N)  -- an N-weighted average over the
-whole region, reproducing the per-window lag treatment exactly.
+Reads a polygon (data/interior_region.json, written by pick_region.py), loads
+its whole bounding box across all 5 epochs (the 5 W-slices) in one piece, masks
+every pixel outside the polygon to NaN, and runs compute_s2 ONCE on the whole
+masked region.  Because compute_s2's FFT cross-correlation is global, this
+single pass counts EVERY valid pixel pair inside the clicked domain out to the
+requested lag -- including pairs that straddle any arbitrary sub-block boundary,
+which an earlier block-tiled version silently dropped.  It also uses a single
+global mean and variance over the region rather than a per-block one.
 
-Results are binned by 3D separation r = sqrt(dU^2 + dV^2 + dW^2) out to the
-same cap the normal-window profiles use (R_HI_SAMPLED = 0.5 ly), with a
-separate in-plane-only curve (same-epoch pairs, dW = 0).
+compute_s2(..., maxlag_px=) crops the returned lag plane to |dU|,|dV| <= maxlag
+so the large-field call returns a small array (a full uncropped lag plane for a
+multi-Mpix region would be many GB, virtually all of it lags we never use).
+
+Results are binned by 3D separation r = sqrt(dU^2 + dV^2 + dW^2) out to the same
+cap the normal-window profiles use (R_HI_SAMPLED = 0.5 ly), with a separate
+in-plane-only curve (same-epoch pairs, dW = 0).
 """
 import json, os
 import numpy as np
@@ -21,7 +26,7 @@ import structure_function as sf
 RMAX = 0.5007          # ly — matches R_HI_SAMPLED in make_turnover_profiles.py
 RMIN = 8e-3            # ly — matches phys_profile rmin
 NBIN = 14             # matches phys_profile nbin
-BLOCK = 400           # px — normal window size
+MAXLAG_PX = 320       # px — lag crop; 0.5 ly / 0.0016 ly/pix = 312.5, +margin
 N_EPOCHS = 5
 S2_KW = dict(background=0.03, arcsinh_scale=0.03,
              subtract_mean='global', assume_stationary=True,
@@ -34,75 +39,52 @@ def load_polygon(path):
     return v, d
 
 
-def block_grid(vcol, vrow, block=BLOCK):
-    """Non-overlapping block origins (row0, col0) tiling the polygon bbox."""
-    r0, r1 = int(np.floor(vrow.min())), int(np.ceil(vrow.max()))
-    c0, c1 = int(np.floor(vcol.min())), int(np.ceil(vcol.max()))
-    rows = list(range(r0, r1, block))
-    cols = list(range(c0, c1, block))
-    return rows, cols, (r0, r1, c0, c1)
+def accumulate(poly_path, data_dir, maxlag_px=MAXLAG_PX, verbose=True):
+    """Load the whole polygon bbox, mask to the polygon, run compute_s2 once.
 
-
-def accumulate(poly_path, data_dir, block=BLOCK, min_frac=0.02, verbose=True):
-    """Tile the region, run compute_s2 per block, accumulate dsq & N per lag.
-
-    Returns a dict with the accumulated s2 grid (n_pairs, 2b-1, 2b-1), n_counts,
-    lag_du, lag_dv, lag_dw, epoch_pairs, plus bookkeeping.
+    Returns a dict with the region s2 grid (n_pairs, 2*ml+1, 2*ml+1), n_counts,
+    lag_du, lag_dv, lag_dw, epoch_pairs, plus bookkeeping.  For downstream
+    binning the key 'dsq' = s2 * n_counts is provided (so bin_by_separation is
+    shared with the old tiled path unchanged).
     """
     verts, meta = load_polygon(poly_path)
     vcol, vrow = verts[:, 0], verts[:, 1]
     path = Path(verts)                              # (col, row) order
     H, W = meta['field_shape_HxW']
 
-    rows, cols, bbox = block_grid(vcol, vrow, block)
-    acc_dsq = acc_N = None
-    lag_du = lag_dv = lag_dw = epoch_pairs = None
-    n_blocks_used = 0
-    total_pix = 0
+    r0, r1 = int(np.floor(vrow.min())), int(np.ceil(vrow.max()))
+    c0, c1 = int(np.floor(vcol.min())), int(np.ceil(vcol.max()))
+    r1 = min(r1, H); c1 = min(c1, W)
+    bbox = (r0, r1, c0, c1)
+    if verbose:
+        print(f'  bbox rows(V) {r0}:{r1} ({r1 - r0}) '
+              f'cols(U) {c0}:{c1} ({c1 - c0})', flush=True)
 
-    for r0 in rows:
-        r1 = min(r0 + block, H)
-        for c0 in cols:
-            c1 = min(c0 + block, W)
-            # in-polygon mask for this block, in absolute pixel coords
-            cc, rr = np.meshgrid(np.arange(c0, c1), np.arange(r0, r1))
-            inside = path.contains_points(
-                np.column_stack([cc.ravel(), rr.ravel()])
-            ).reshape(rr.shape)
-            npix = int(inside.sum())
-            if npix < min_frac * (block * block):
-                continue
+    # in-polygon mask over the whole bbox, in absolute pixel coords
+    cc, rr = np.meshgrid(np.arange(c0, c1), np.arange(r0, r1))
+    inside = path.contains_points(
+        np.column_stack([cc.ravel(), rr.ravel()])
+    ).reshape(rr.shape)
+    total_pix = int(inside.sum())
+    if verbose:
+        print(f'  in-polygon pixels: {total_pix} '
+              f'({100 * total_pix / inside.size:.1f}% of bbox)', flush=True)
 
-            data = sf._read_noclip_region(
-                data_dir, slice(r0, r1), slice(c0, c1),
-                tuple(range(N_EPOCHS)), stride=1)
-            flux = data['flux_epochs']              # (5, nr, nc)
-            # blank everything outside the polygon
-            flux[:, ~inside] = np.nan
-            data['flux_epochs'] = flux
+    data = sf._read_noclip_region(
+        data_dir, slice(r0, r1), slice(c0, c1),
+        tuple(range(N_EPOCHS)), stride=1)
+    flux = data['flux_epochs']                      # (5, nr, nc)
+    flux[:, ~inside] = np.nan                        # blank outside the polygon
+    data['flux_epochs'] = flux
 
-            res = sf.compute_s2(data, **S2_KW)
-            s2, N = res['s2'], res['n_counts']
-            dsq = np.where(N > 0, s2 * N, 0.0)
+    res = sf.compute_s2(data, maxlag_px=maxlag_px, **S2_KW)
+    s2, N = res['s2'], res['n_counts']
+    dsq = np.where(N > 0, s2 * N, 0.0)
 
-            if acc_dsq is None:
-                acc_dsq = np.zeros_like(dsq, dtype=np.float64)
-                acc_N = np.zeros_like(N, dtype=np.int64)
-                lag_du, lag_dv = res['lag_du'], res['lag_dv']
-                lag_dw, epoch_pairs = res['lag_dw'], res['epoch_pairs']
-            # blocks can differ in size at the field edge; only accumulate
-            # matching-shape blocks (interior blocks are full BLOCK x BLOCK)
-            if dsq.shape == acc_dsq.shape:
-                acc_dsq += dsq
-                acc_N += N
-                n_blocks_used += 1
-                total_pix += npix
-            if verbose:
-                print(f'  block r{r0} c{c0}: {npix} in-poly px', flush=True)
-
-    return dict(dsq=acc_dsq, n_counts=acc_N, lag_du=lag_du, lag_dv=lag_dv,
-                lag_dw=lag_dw, epoch_pairs=epoch_pairs,
-                n_blocks=n_blocks_used, n_pix=total_pix, bbox=bbox, meta=meta)
+    return dict(dsq=dsq, n_counts=N,
+                lag_du=res['lag_du'], lag_dv=res['lag_dv'],
+                lag_dw=res['lag_dw'], epoch_pairs=res['epoch_pairs'],
+                n_blocks=1, n_pix=total_pix, bbox=bbox, meta=meta)
 
 
 def bin_by_separation(acc, rmin=RMIN, rmax=RMAX, nbin=NBIN):

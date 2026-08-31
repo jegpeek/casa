@@ -453,7 +453,8 @@ def compute_s2(data: dict,
                assume_stationary: bool = True,
                background: float | np.ndarray | None = 0.03,
                arcsinh_scale: float | None = 0.03,
-               subtract_mean: str = 'global') -> dict:
+               subtract_mean: str = 'global',
+               maxlag_px: int | None = None) -> dict:
     """
     Compute the 3D structure function for one chunk.
 
@@ -605,7 +606,25 @@ def compute_s2(data: dict,
         MF_fft  = [rfft2(masks[e] * f_[e],    s=fft_shape) for e in range(n_epochs)]
         MF2_fft = [rfft2(masks[e] * f_[e]**2, s=fft_shape) for e in range(n_epochs)]
 
-    out_shape = (n_pairs, 2 * n_rows - 1, 2 * n_cols - 1)
+    # Optional lag crop: keep only |dU|,|dV| <= maxlag_px pixels.  The FFT
+    # cross-correlation is global (it already counts every valid pair over the
+    # whole field, including pairs that would straddle any sub-block boundary),
+    # so cropping the *output* to the lags of interest lets a single large-field
+    # call return a small array without changing any counted pair.  Crop indices
+    # are taken in FFT-natural order (0..+max, then -max..-1), so the cropped
+    # arrays remain fftshift-compatible.
+    if maxlag_px is not None:
+        ml = int(maxlag_px)
+        ri = np.r_[0:ml + 1, (2 * n_rows - 1) - ml: 2 * n_rows - 1]
+        ci = np.r_[0:ml + 1, (2 * n_cols - 1) - ml: 2 * n_cols - 1]
+        lag_du = lag_du[ci]
+        lag_dv = lag_dv[ri]
+        out_r, out_c = len(ri), len(ci)
+    else:
+        ri = ci = None
+        out_r, out_c = 2 * n_rows - 1, 2 * n_cols - 1
+
+    out_shape = (n_pairs, out_r, out_c)
     s2       = np.full(out_shape, np.nan, dtype=np.float32)
     n_counts = np.zeros(out_shape, dtype=np.int32)
 
@@ -615,6 +634,9 @@ def compute_s2(data: dict,
             M_fft[j], MF_fft[j], MF2_fft[j],
             fft_shape, n_rows, n_cols,
         )
+        if ri is not None:
+            dsq = dsq[np.ix_(ri, ci)]
+            N   = N[np.ix_(ri, ci)]
         valid = N >= 0.5
         s2[k][valid]  = dsq[valid] / N[valid]
         n_counts[k]   = N
